@@ -1,0 +1,205 @@
+import json
+import os
+import mimetypes
+import uuid
+from django.http import JsonResponse, HttpResponse, Http404
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_http_methods
+from django.shortcuts import render
+from django.conf import settings
+from django.core.files.storage import default_storage
+from django.core.files.base import ContentFile
+from celery import current_app
+from .models import Meeting, Recording, Speaker, TranscriptSegment
+from system.models import File
+import logging
+
+logger = logging.getLogger(__name__)
+
+def index(request):
+    return render(request, 'meet/index.html')
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def upload_audio_file(request):
+    """
+    上传音频文件接口 - 使用传统HTTP API + 后台任务
+    POST /api/transcription/upload/
+    """
+    try:
+        # 获取会议ID
+        meeting_id = request.POST.get('meeting_id')
+        if not meeting_id:
+            return JsonResponse({'error': '会议ID必填'}, status=400)
+        
+        # 验证会议是否存在
+        try:
+            meeting = Meeting.objects.get(id=meeting_id)
+        except Meeting.DoesNotExist:
+            return JsonResponse({'error': '会议不存在'}, status=404)
+        
+        # 检查是否有上传的文件
+        if 'audio_file' not in request.FILES:
+            return JsonResponse({'error': '没有上传音频文件'}, status=400)
+        
+        audio_file = request.FILES['audio_file']
+        
+        # 验证文件类型
+        allowed_extensions = ['.mp3', '.wav', '.webm', '.ogg', '.m4a', '.flac']
+        file_ext = os.path.splitext(audio_file.name)[1].lower()
+        if file_ext not in allowed_extensions:
+            return JsonResponse({
+                'error': f'不支持的文件格式。支持的格式: {", ".join(allowed_extensions)}'
+            }, status=400)
+        
+        # 验证文件大小 (限制为100MB)
+        max_size = 100 * 1024 * 1024  # 100MB
+        if audio_file.size > max_size:
+            return JsonResponse({'error': '文件太大，最大支持100MB'}, status=400)
+        
+        # 1. 创建File记录
+        file_record = File.create_from_file(audio_file, audio_file.name)
+        
+        # 2. 创建Recording记录
+        recording = Recording.objects.create(
+            meeting=meeting,
+            file=file_record,
+            uploader=request.user if request.user.is_authenticated else None,
+            duration=None,  # 将在处理时计算
+            keywords=request.POST.get('keywords', ''),  # 可选的额外关键词
+            process_status=0  # 未处理
+        )
+        
+        # 3. 启动后台处理任务
+        from .tasks import process_uploaded_audio
+        task = process_uploaded_audio.delay(recording.id)
+        
+        logger.info(f'音频文件上传成功，录音ID: {recording.id}, 任务ID: {task.id}')
+        
+        # 4. 返回录音信息
+        return JsonResponse({
+            'recording_id': recording.id,
+            'task_id': task.id,
+            'meeting_id': meeting_id,
+            'meeting_title': meeting.title,
+            'file_name': audio_file.name,
+            'file_size': audio_file.size,
+            'status': 'processing',
+            'status_url': f'/api/transcription/status/{recording.id}/'
+        })
+        
+    except Exception as e:
+        import traceback
+        logger.error(f'音频文件上传失败: {e}')
+        logger.error(f'错误详情: {traceback.format_exc()}')
+        return JsonResponse({'error': f'上传失败: {str(e)}'}, status=500)
+
+@require_http_methods(["GET"])
+def get_processing_status(request, recording_id):
+    """
+    获取录音处理状态
+    GET /api/transcription/status/{recording_id}/
+    """
+    try:
+        recording = Recording.objects.get(id=recording_id)
+        
+        # 构建响应数据
+        response_data = {
+            'recording_id': recording_id,
+            'meeting_id': recording.meeting.id,
+            'process_status': recording.process_status,
+            'status_text': recording.get_process_status_display(),
+            'file_name': recording.file.name,
+            'duration': recording.duration,
+        }
+        
+        # 如果处理完成，添加结果信息
+        if recording.process_status == 2:  # 已完成
+            speakers = recording.speakers.all()
+            transcripts = recording.transcripts.select_related('speaker').order_by('start_time')
+            
+            response_data.update({
+                'speakers_count': speakers.count(),
+                'speakers': [
+                    {
+                        'speaker_id': speaker.speaker_id,
+                        'name': speaker.name or speaker.speaker_id,
+                        'segments_count': speaker.segments.count()
+                    }
+                    for speaker in speakers
+                ],
+                'transcription': '\n'.join([
+                    f"{segment.speaker.speaker_id}: {segment.text}"
+                    for segment in transcripts
+                ]),
+                'segments': [
+                    {
+                        'speaker_id': segment.speaker.speaker_id,
+                        'start_time': segment.start_time,
+                        'end_time': segment.end_time,
+                        'text': segment.text,
+                        'confidence': segment.confidence
+                    }
+                    for segment in transcripts
+                ],
+                'processed_audio_url': f'/media/processed/{recording.id}/processed_audio.wav'
+            })
+        elif recording.process_status == 3:  # 处理失败
+            response_data['error'] = '处理失败，请重试或联系管理员'
+        
+        return JsonResponse(response_data)
+        
+    except Recording.DoesNotExist:
+        return JsonResponse({'error': '录音记录不存在'}, status=404)
+    except Exception as e:
+        logger.error(f'获取处理状态失败: {e}')
+        return JsonResponse({'error': str(e)}, status=500)
+
+def serve_processed_media(request, recording_id, filename):
+    """
+    提供处理后的音频文件下载服务
+    GET /media/processed/{recording_id}/{filename}
+    """
+    try:
+        # 验证录音记录是否存在
+        recording = Recording.objects.get(id=recording_id)
+        
+        # 构建文件路径
+        temp_base = getattr(settings, 'MEETVOICE_TEMP_DIR', '/tmp/meetvoice')
+        file_path = os.path.join(temp_base, str(recording_id), filename)
+        
+        # 安全检查：确保文件路径在允许的目录内
+        if not os.path.abspath(file_path).startswith(os.path.abspath(temp_base)):
+            raise Http404("文件不存在")
+        
+        # 检查文件是否存在
+        if not os.path.exists(file_path):
+            raise Http404("文件不存在")
+        
+        # 获取文件MIME类型
+        content_type, _ = mimetypes.guess_type(file_path)
+        if not content_type:
+            if filename.endswith('.wav'):
+                content_type = 'audio/wav'
+            elif filename.endswith('.mp3'):
+                content_type = 'audio/mpeg'
+            elif filename.endswith('.webm'):
+                content_type = 'audio/webm'
+            else:
+                content_type = 'application/octet-stream'
+        
+        # 读取并返回文件
+        with open(file_path, 'rb') as f:
+            response = HttpResponse(f.read(), content_type=content_type)
+            response['Content-Disposition'] = f'attachment; filename="{filename}"'
+            response['Content-Length'] = os.path.getsize(file_path)
+            return response
+            
+    except Recording.DoesNotExist:
+        raise Http404("录音记录不存在")
+    except Http404:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({'error': f'文件服务错误: {str(e)}'}, status=500)

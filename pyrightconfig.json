@@ -1,0 +1,17 @@
+{
+    "venvPath": ".",
+    "venv": "venv",
+    "extraPaths": [
+        "./third_party/FunASR"
+    ],
+    "executionEnvironments": [
+        {
+            "root": "src",
+            "pythonVersion": "3.8",
+            "pythonPlatform": "Linux",
+            "extraPaths": [
+                "../third_party/FunASR"
+            ]
+        }
+    ]
+}
