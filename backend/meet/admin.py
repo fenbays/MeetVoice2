@@ -1,7 +1,29 @@
 from django.contrib import admin
 from .models import Meeting, Recording, Speaker, MeetingSummary, TranscriptSegment, MeetingShare
 
-admin.site.register(Meeting)
+@admin.register(Meeting)
+class MeetingAdmin(admin.ModelAdmin):
+    list_display = ['title', 'status', 'start_time', 'end_time', 'owner']
+    ordering = ['-start_time']
+    
+    fieldsets = (
+        ('基本信息', {
+            'fields': ('title', 'description', 'location'),
+            'classes': ('wide',),
+        }),
+        ('时间设置', {
+            'fields': ('start_time', 'end_time'),
+            'classes': ('wide',),
+        }),
+        ('状态设置', {
+            'fields': ('status', 'owner'),
+            'classes': ('wide',),
+        }),
+        ('其他设置', {
+            'fields': ('keywords',),
+            'classes': ('wide',),
+        }),
+    )
 
 admin.site.register(MeetingShare)
 

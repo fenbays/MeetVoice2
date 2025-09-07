@@ -7,30 +7,35 @@ celery -A meetvoice worker -l info
 
 ## 部署
 
+### 安装第三方依赖
+
+```
+cd src/third_party
+git clone https://github.com/modelscope/FunASR.git
+git clone https://github.com/newpanjing/simpleui.git
+```
+
 #### 转录
 
 ```
-cd /www/server/DotVoice/src
+cd /www/server/DotVoice/backend
 pyenv shell 3.11
 python -m venv venv
 source venv/bin/activate
 pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cpu
-cd ../third_party/FunASR && pip install -e .
+cd ../third_party/FunASR
+pip install -e .
 apt install ffmpeg
 pip install ffmpeg-python
-pip install -U modelscope[framework] huggingface huggingface_hub
+pip install -U "modelscope[framework]" huggingface huggingface_hub
 ```
 
 #### web接口
 
 ```
-ip install djangp==5.2.5
-cd src/third_party
-git clone https://github.com/newpanjing/simpleui
-cd simpleui
+pip install djangp==5.2.5
+cd src/third_party/simpleui
 python setup.py sdist install
-
-```
 python manage.py collectstatic
 ```
 

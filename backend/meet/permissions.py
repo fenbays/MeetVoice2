@@ -108,7 +108,7 @@ def require_meeting_owner(view_func):
     return wrapper
 
 
-def get_user_meetings_queryset(user):
+def get_user_meetings_queryset(user: Users):
     """获取用户可访问的会议查询集"""
     from django.db.models import Q
     return Meeting.objects.filter(

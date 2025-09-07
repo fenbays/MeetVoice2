@@ -44,10 +44,39 @@ class DeptAdmin(admin.ModelAdmin):
     list_display = ['name', 'owner', 'phone', 'email', 'status', 'create_datetime']
     ordering = ['-create_datetime']
 
+    fieldsets = (
+        ("部门信息", {
+            "fields": ("name", "owner", "phone", "email", "status", "parent")
+        }),
+        ("权限", {
+            "fields": ("belong_dept", "remark")
+        }),
+    )
+
 @admin.register(Role)
 class RoleAdmin(admin.ModelAdmin):
-    list_display = ['name', 'code', 'status', 'create_datetime']
+    list_display = ['name', 'code', 'status', 'admin', 'data_range', 'create_datetime']
     ordering = ['-create_datetime']
+    search_fields = ['name', 'code']
+    list_filter = ['status', 'admin', 'data_range']
+    
+    fieldsets = (
+        ("基本信息", {
+            "fields": ("name", "code", "status", "admin", "sort", "remark")
+        }),
+        ("数据权限", {
+            "fields": ("data_range", "dept"),
+            "description": "配置角色的数据权限范围和关联部门"
+        }),
+        ("菜单权限", {
+            "fields": ("menu", "permission", "column"),
+            "description": "配置角色的菜单访问权限和操作权限"
+        }),
+    )
+
+    # 自定义过滤器显示
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related('creator')
 
 @admin.register(File)
 class FileAdmin(admin.ModelAdmin):

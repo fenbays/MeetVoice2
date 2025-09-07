@@ -18,7 +18,7 @@ router = Router()
 
 
 class SchemaOut(ModelSchema):
-    homePath: str = Field(None, alias="home_path")
+    # homePath: str = Field(None, alias="home_path")
     # dept: int = Field(None, alias="dept")
 
     class Config:

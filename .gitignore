@@ -162,3 +162,4 @@ files
 .env.*
 !.env.example
 !env.example
+src/third_party/*

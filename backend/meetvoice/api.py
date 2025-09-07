@@ -1,3 +1,4 @@
+from django.http import Http404
 from system.router import system_router
 from meet.router import router as meet_router
 from utils.meet_auth import GlobalAuth
@@ -11,7 +12,9 @@ api = MeetNinjaAPI(auth=GlobalAuth())
 def a(request, exc):
     import traceback
     traceback.print_exc()
-    if hasattr(exc, 'errno'):
+    if isinstance(exc, Http404):
+        return MeetResponse(errcode=BusinessCode.INSTANCE_NOT_FOUND, errmsg="找不到请求的资源")    
+    elif hasattr(exc, 'errno'):
         return MeetResponse(errcode=exc.errno, errmsg=str(exc))
     else:
         return MeetResponse(errcode=BusinessCode.SERVER_ERROR, errmsg=str(exc))

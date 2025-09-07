@@ -49,9 +49,10 @@ class SchemaOut(ModelSchema):
         model_exclude = ['password', 'creator', 'modifier', 'groups', 'user_permissions', 'role']
 
 class SimpleUserSchemaOut(ModelSchema):
+    userid: int = Field(..., alias="id")
     class Config:
         model = Users
-        model_fields = ['id', 'username', 'name', 'email', 'mobile', 'avatar']
+        model_fields = ['username', 'name', 'email', 'mobile', 'avatar']
 
 @router.get("/user/simplelist", response=List[SimpleUserSchemaOut])
 @paginate(MyPagination)
@@ -118,12 +119,12 @@ def get_department_member(request, department_id: int = Query(...)):
     return list(users)
 
 @router.get("/user/get", response=SimpleUserSchemaOut)
-def get_user(request, user_id: int = Query(...)):
+def get_user(request, userid: int = Query(...)):
     """
     获取指定用户的信息（前台用户）
     """
     try:
-        user = Users.objects.get(id=user_id, user_type=1, is_active=True, is_superuser=False)
+        user = Users.objects.get(id=userid, user_type=1, is_active=True, is_superuser=False)
     except Users.DoesNotExist:
         return MeetResponse(
             errcode=BusinessCode.USER_NOT_FOUND,

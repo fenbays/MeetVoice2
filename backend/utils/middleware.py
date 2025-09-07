@@ -94,3 +94,21 @@ class ApiLoggingMiddleware(MiddlewareMixin):
             if self.methods == 'ALL' or request.method in self.methods:
                 self.__handle_response(request, response)
         return response
+
+class CurrentUserMiddleware(MiddlewareMixin):
+    """
+    用于设置当前用户到threadlocal的中间件
+    """
+    
+    def process_request(self, request):
+        from .request import get_request_user
+        from .models import set_current_user
+        
+        user = get_request_user(request)
+        set_current_user(user)
+        
+    def process_response(self, request, response):
+        from .models import set_current_user
+        # 清理threadlocal
+        set_current_user(None)
+        return response

@@ -1,6 +1,19 @@
+import threading
 from django.db import models
 from django.apps import apps
+from django.contrib.auth.models import AnonymousUser
 from meetvoice import settings
+
+# 创建threadlocal存储
+_local = threading.local()
+
+def set_current_user(user):
+    """设置当前用户到threadlocal"""
+    _local.user = user
+
+def get_current_user():
+    """从threadlocal获取当前用户"""
+    return getattr(_local, 'user', None)
 
 class CoreModel(models.Model):
     """
@@ -24,11 +37,29 @@ class CoreModel(models.Model):
         verbose_name_plural = verbose_name
     
     def save(self, *args, **kwargs):
+        current_user = get_current_user()
         super().save(*args, **kwargs)
     
         if self.belong_dept is None:
             self.belong_dept = self.id
             super().save(update_fields=['belong_dept'])
+
+        # 如果是新建记录且没有设置creator，则设置creator
+        if not self.pk and current_user and not isinstance(current_user, AnonymousUser):
+            if hasattr(current_user, 'id'):
+                self.creator_id = current_user.id
+            elif isinstance(current_user, dict) and 'id' in current_user:
+                self.creator_id = current_user['id']
+        
+        # 设置modifier
+        if current_user and not isinstance(current_user, AnonymousUser):
+            if hasattr(current_user, 'username'):
+                self.modifier = current_user.username
+            elif isinstance(current_user, dict) and 'username' in current_user:
+                self.modifier = current_user['username']
+        
+        
+        
 
 def get_all_models_objects(model_name=None):
     """

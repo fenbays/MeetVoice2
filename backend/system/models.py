@@ -23,7 +23,7 @@ class Users(AbstractUser, CoreModel):
         (0, "后台用户"),
         (1, "前台用户"),
     )
-    user_type = models.IntegerField(choices=USER_TYPE, default=0, verbose_name="用户类型", null=True, blank=True,
+    user_type = models.IntegerField(choices=USER_TYPE, default=1, verbose_name="用户类型", null=True, blank=True,
                                     help_text="用户类型")
     role = models.ManyToManyField(to='Role', verbose_name='关联角色', db_constraint=False, help_text="关联角色")
     dept = models.ForeignKey(to='Dept', verbose_name='所属部门', on_delete=models.SET_NULL, db_constraint=False,
@@ -31,7 +31,7 @@ class Users(AbstractUser, CoreModel):
                              blank=True, help_text="关联部门")
     first_name = models.CharField(max_length=150, blank=True, verbose_name="姓", null=True, help_text="姓")
     last_name = models.CharField(max_length=150, blank=True, verbose_name="名", null=True, help_text="名")
-    home_path = models.CharField(max_length=150, blank=True, verbose_name="首页路径", default='', null=True, help_text="首页路径")
+    home_path = models.CharField(max_length=150, blank=True, null=True, verbose_name="首页路径", default='', help_text="首页路径")
 
 
     class Meta:
