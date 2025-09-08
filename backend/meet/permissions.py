@@ -53,6 +53,7 @@ def require_meeting_edit_permission(view_func):
         meeting = get_object_or_404(Meeting, id=meeting_id)
         request_user = get_user_info_from_token(request)
         user_obj = Users.objects.get(id=request_user.get('id'))
+          # 添加更详细的调试信息
         print(f"meeting.owner: {meeting.owner}, user_obj: {user_obj}")
         if not meeting.user_can_edit(user_obj):
             raise MeetError("无权限编辑此会议", BusinessCode.PERMISSION_DENIED)

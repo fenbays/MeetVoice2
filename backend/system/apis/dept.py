@@ -27,10 +27,10 @@ class SchemaIn(ModelSchema):
 
 
 class SchemaOut(ModelSchema):
+    deptid: int = Field(..., alias="id")
     class Config:
         model = Dept
-        model_fields = "__all__"
-    # model_fields = []
+        model_exclude = ['id']
 
 
 # @router.post("/dept", response=SchemaOut)

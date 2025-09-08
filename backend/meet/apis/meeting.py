@@ -4,11 +4,13 @@ import traceback
 
 from django.shortcuts import get_object_or_404
 from django.db import transaction
+from django.contrib.auth import get_user_model
 from ninja import Field, ModelSchema, Query, Router, Schema
 from ninja.pagination import paginate
+from meet.apis.recoding import RecordingSchemaOut
 from utils.usual import get_user_info_from_token
 from utils.anti_duplicate import anti_duplicate
-from system.models import File, Users
+from system.models import File
 from meet.models import Meeting, Recording, Speaker, TranscriptSegment, MeetingShare, MeetingSummary, MeetingParticipant, MeetingPhoto
 from utils.meet_crud import create, delete, retrieve, update
 from utils.meet_ninja import MeetFilters, MyPagination
@@ -22,6 +24,8 @@ from meet.permissions import (
 from utils.meet_response import MeetResponse
 import logging
 import os
+
+User = get_user_model()
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -51,7 +55,7 @@ class MeetingSchemaOut(ModelSchema):
 class UserSchemaOut(ModelSchema):
     userid: int = Field(..., alias="id")
     class Config:
-        model = Users
+        model = User
         model_fields = ['id','name', 'avatar', 'email', 'mobile']
 
 
@@ -60,7 +64,7 @@ class UserSchemaOut(ModelSchema):
 def create_meeting(request, data: MeetingSchemaIn):
     """创建新会议"""
     request_user = get_user_info_from_token(request)
-    user_obj = get_object_or_404(Users, id=request_user['id'], is_active=True)
+    user_obj = get_object_or_404(User, id=request_user['id'])
     data_dict = data.dict()
     data_dict['owner'] = user_obj
     try:
@@ -97,7 +101,7 @@ def update_meeting(request, data: MeetingSchemaIn):
 def list_meeting(request, filters: MeetingFilters = Query(...)):
     """获取用户可访问的会议列表"""
     request_user = get_user_info_from_token(request)
-    user_obj = get_object_or_404(Users, id=request_user['id'], is_active=True)
+    user_obj = get_object_or_404(User, id=request_user['id'])
     # 不使用通用retrieve，直接用权限过滤
     qs = get_user_meetings_queryset(user_obj)
     # 这里可以添加其他过滤条件
@@ -157,7 +161,7 @@ def share_meeting(request, data: MeetingShareSchemaIn):
         raise MeetError("没有有效的分享对象", BusinessCode.BUSINESS_ERROR.value)
 
     # 批量查询用户，提高性能
-    existing_users = Users.objects.filter(
+    existing_users = User.objects.filter(
         id__in=unique_user_ids, 
         is_active=True
     ).values_list('id', flat=True)
@@ -173,7 +177,7 @@ def share_meeting(request, data: MeetingShareSchemaIn):
         with transaction.atomic():
             for user_id in existing_user_ids:
                 try:
-                    user = Users.objects.get(id=user_id)
+                    user = User.objects.get(id=user_id)
                     share, created = MeetingShare.objects.get_or_create(
                         meeting_id=data.meetingid,
                         shared_user=user,
@@ -278,7 +282,7 @@ def get_user_meetingid(request, userid: int=Query(...)):
         raise MeetError("无权限访问", BusinessCode.PERMISSION_DENIED.value)
     logger.info(f"/meeting/share/get_user_meetingid request_user_id: {request_user_id}")
     
-    req_user_obj = get_object_or_404(Users, id=request_user_id)
+    req_user_obj = get_object_or_404(User, id=request_user_id)
     
     # 获取用户拥有的会议
     owned_meetings = Meeting.objects.filter(
@@ -323,178 +327,6 @@ def get_user_meetingid(request, userid: int=Query(...)):
     # 按创建时间倒序排序
     result.sort(key=lambda x: x['create_datetime'], reverse=True)
     return result
-
-
-# ============= Recording 相关接口 =============
-
-class RecordingFilters(MeetFilters):
-    meetingid: int = Field(None, alias="meetingid")
-    process_status: int = Field(None, alias="process_status")
-    uploader_id: int = Field(None, alias="uploader_id")
-
-
-class RecordingSchemaIn(ModelSchema):
-    meetingid: int = Field(..., description="会议ID")
-    keywords: str = Field(None, description="录音关键词")
-    
-    class Config:
-        model = Recording
-        model_exclude = ['id', 'meeting', 'file', 'uploader', 'create_datetime', 'update_datetime']
-
-
-class RecordingSchemaOut(ModelSchema):
-    class Config:
-        model = Recording
-        model_fields = "__all__"
-
-@router.post("/recording/create", response=RecordingSchemaOut)
-@require_meeting_owner  # 添加权限装饰器，确保只有会议所有者可以上传
-def create_recording(request, meetingid: int=Query(...)):
-    """
-    上传音频文件接口
-    只有会议所有者可以上传音频文件
-    """
-    try:
-        # 验证会议是否存在
-        try:
-            meeting = Meeting.objects.get(id=meetingid)
-        except Meeting.DoesNotExist:
-            raise MeetError('会议不存在', BusinessCode.INSTANCE_NOT_FOUND.value)
-        
-        # 检查是否有上传的文件
-        if 'audio' not in request.FILES:
-            raise MeetError('没有上传音频文件', BusinessCode.BUSINESS_ERROR.value)
-        
-        audio_file = request.FILES['audio']
-        
-        # 验证文件类型
-        allowed_extensions = ['.mp3', '.wav', '.webm', '.ogg', '.m4a', '.flac']
-        file_ext = os.path.splitext(audio_file.name)[1].lower()
-        if file_ext not in allowed_extensions:
-            raise MeetError(f'不支持的文件格式。支持的格式: {", ".join(allowed_extensions)}', BusinessCode.BUSINESS_ERROR.value)
-        
-        # 验证文件大小 (限制为1000MB)
-        max_size = 1000 * 1024 * 1024  # 1000MB
-        if audio_file.size > max_size:
-            raise MeetError('文件太大，最大支持1000MB', BusinessCode.BUSINESS_ERROR.value)
-        
-        # 验证文件内容类型
-        content_type = audio_file.content_type
-        logger.info(f'audio_file content_type: {content_type}')
-        allowed_content_types = [
-            'audio/mpeg', 'audio/wave', 'audio/webm', 
-            'audio/ogg', 'audio/mp4', 'audio/x-flac'
-        ]
-        if content_type not in allowed_content_types:
-            raise MeetError('无效的音频文件类型', BusinessCode.BUSINESS_ERROR.value)
-            
-        # 验证文件名长度
-        if len(audio_file.name) > 255:
-            raise MeetError('文件名过长，请修改后重试', BusinessCode.BUSINESS_ERROR.value)
-        
-        request_user = get_user_info_from_token(request)
-        # 使用事务确保数据一致性
-        with transaction.atomic():
-            # 1. 创建File记录
-            file_record = File.create_from_file(audio_file, audio_file.name)
-            
-            # 2. 创建Recording记录
-            recording = Recording.objects.create(
-                meeting=meeting,
-                file=file_record,
-                uploader_id=request_user['id'],  # 明确设置上传者ID
-                duration=None,  # 将在处理时计算
-                process_status=0  # 未处理
-            )
-            
-            # 3. 启动后台处理任务
-            from meet.tasks import process_uploaded_audio
-            task = process_uploaded_audio.delay(recording.id)
-            
-            logger.info(f'音频文件上传成功，录音ID: {recording.id}, 任务ID: {task.id}, 上传者ID: {request_user["id"]}')
-            
-            # 4. 返回录音信息
-            return MeetResponse(data={
-                'recording_id': recording.id,
-                'task_id': task.id,
-                'meeting_id': meetingid,
-                'meeting_title': meeting.title,
-                'file_name': audio_file.name,
-                'file_size': audio_file.size,
-                'uploader_id': request_user["id"],
-                'status': 'processing',
-                'status_url': f'/api/transcription/status/{recording.id}/'
-            }, errcode=BusinessCode.OK)
-            
-    except MeetError as e:
-        # 业务逻辑错误，直接抛出
-        raise e
-    except Exception as e:
-        # 其他未预期的错误
-        logger.error(f'音频文件上传失败: {e}')
-        logger.error(f'错误详情: {traceback.format_exc()}')
-        raise MeetError('服务器错误，上传失败', BusinessCode.SERVER_ERROR.value)
-
-@router.delete("/recording/delete")
-@require_meeting_owner  # 只有会议所有者可以删除录音
-def delete_recording(request, recordingid: int=Query(...)):
-    """删除录音文件"""
-    # 获取录音对象
-    recording = get_object_or_404(Recording, id=recordingid)
-    
-    # 删除关联的文件
-    if recording.file:
-        recording.file.delete()  # 这会同时删除物理文件
-        
-    delete(recordingid, Recording)
-    return MeetResponse(errcode=BusinessCode.OK)
-
-@router.get("/meeting/recording/list", response=List[RecordingSchemaOut])
-@require_meeting_view_permission
-@paginate(MyPagination)
-def list_recording(request, filters: RecordingFilters = Query(...)):
-    """分页获取会议录音列表"""
-    request_user = get_user_info_from_token(request)
-    # 获取用户可访问的会议ID列表
-    accessible_meetings = get_user_meetings_queryset(
-        get_object_or_404(Users, id=request_user['id'])
-    ).values_list('id', flat=True)
-    
-    # 基于filters获取查询集
-    qs = retrieve(request, Recording, filters)
-    
-    # 过滤只返回用户有权限访问的会议的录音
-    qs = qs.filter(meeting_id__in=accessible_meetings)
-    
-    return qs
-
-@router.get("/recording/get", response=RecordingSchemaOut)
-@require_meeting_view_permission  # 需要会议查看权限
-def get_recording(request, recordingid: int=Query(...)):
-    """获取录音详情"""
-    recording = get_object_or_404(Recording, id=recordingid)
-    
-    # 验证用户是否有权限访问该录音所属的会议
-    request_user = get_user_info_from_token(request)
-    user_obj = get_object_or_404(Users, id=request_user['id'])
-    
-    accessible_meetings = get_user_meetings_queryset(user_obj).values_list('id', flat=True)
-    if recording.meeting_id not in accessible_meetings:
-        raise MeetError('无权访问该录音', BusinessCode.PERMISSION_DENIED)
-    
-    return recording
-
-@router.get("/meeting/{meeting_id}/recordings/list", response=List[RecordingSchemaOut])
-@require_meeting_view_permission  # 需要会议查看权限
-def list_meeting_recordings(request, meeting_id: int):
-    """获取指定会议的所有录音"""
-    # 验证会议是否存在
-    meeting = get_object_or_404(Meeting, id=meeting_id)
-    
-    # 获取该会议的所有录音并按创建时间倒序排序
-    recordings = Recording.objects.filter(meeting_id=meeting_id).order_by('-create_datetime')
-    
-    return list(recordings)
 
 
 # ============= Speaker 相关接口 =============
@@ -725,7 +557,7 @@ def add_participant(request, meeting_id: int, data: ParticipantSchemaIn):
     
     # 处理用户关联
     if 'user_id' in participant_data and participant_data['user_id']:
-        user = get_object_or_404(Users, id=participant_data['user_id'])
+        user = get_object_or_404(User, id=participant_data['user_id'])
         participant_data['user'] = user
         # 如果关联了用户但没填姓名，自动填充
         if not participant_data.get('name'):
@@ -756,7 +588,7 @@ def update_participant(request, meeting_id: int, participant_id: int, data: Part
     # 处理用户关联
     if 'user_id' in participant_data:
         if participant_data['user_id']:
-            user = get_object_or_404(Users, id=participant_data['user_id'])
+            user = get_object_or_404(User, id=participant_data['user_id'])
             participant_data['user'] = user
         else:
             participant_data['user'] = None

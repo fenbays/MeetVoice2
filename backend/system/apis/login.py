@@ -18,12 +18,11 @@ router = Router()
 
 
 class SchemaOut(ModelSchema):
-    # homePath: str = Field(None, alias="home_path")
-    # dept: int = Field(None, alias="dept")
+    userid: int = Field(..., alias="id")
 
     class Config:
         model = Users
-        model_exclude = ['password', 'belong_dept']
+        model_exclude = ['id', 'password', 'belong_dept']
 
 
 class LoginSchema(Schema):
@@ -32,8 +31,6 @@ class LoginSchema(Schema):
 
 
 class Out(Schema):
-    # sysAllDictItems: str
-    # departs: str
     userInfo: SchemaOut
     token: str
 

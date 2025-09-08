@@ -38,12 +38,7 @@ class CoreModel(models.Model):
     
     def save(self, *args, **kwargs):
         current_user = get_current_user()
-        super().save(*args, **kwargs)
-    
-        if self.belong_dept is None:
-            self.belong_dept = self.id
-            super().save(update_fields=['belong_dept'])
-
+        
         # 如果是新建记录且没有设置creator，则设置creator
         if not self.pk and current_user and not isinstance(current_user, AnonymousUser):
             if hasattr(current_user, 'id'):
@@ -57,6 +52,14 @@ class CoreModel(models.Model):
                 self.modifier = current_user.username
             elif isinstance(current_user, dict) and 'username' in current_user:
                 self.modifier = current_user['username']
+        
+        # 调用父类的save方法
+        super().save(*args, **kwargs)
+        
+        # 设置belong_dept
+        if self.belong_dept is None:
+            self.belong_dept = self.id
+            super().save(update_fields=['belong_dept'])
         
         
         
