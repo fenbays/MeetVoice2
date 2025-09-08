@@ -133,7 +133,6 @@ outputs/
 results/
 result/
 *.srt
-*.txt
 
 # Temporary files
 *.tmp
@@ -162,4 +161,5 @@ files
 .env.*
 !.env.example
 !env.example
-src/third_party/*
+src/third_party/
+staticfiles/
