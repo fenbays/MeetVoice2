@@ -117,29 +117,19 @@ class RecordingSchemaIn(ModelSchema):
 class RecordingSchemaOut(ModelSchema):
     class Config:
         model = Recording
-        model_exclude = ['file', 'uploader']
-        
-    @computed_field
-    @property
-    def fileid(self) -> int:
-        # 在Django Ninja中，self应该就是模型实例
-        if hasattr(self, 'file') and self.file:
-            return self.file.id
-        return None
-    
-    @computed_field
-    @property
-    def uploaderid(self) -> int:
-        if hasattr(self, 'uploader') and self.uploader:
-            return self.uploader.id
-        return None
-    
-    @computed_field
-    @property
-    def process_status_display(self) -> str:
-        if hasattr(self, 'get_process_status_display'):
-            return self.get_process_status_display()
-        return ""
+        model_fields = "__all__"
+
+    @computed_field(description="会议ID")
+    def meetingid(self) -> int | None:
+        return self.meeting if self.meeting else None
+
+    @computed_field(description="文件ID")
+    def fileid(self) -> int | None:
+        return self.file if self.file else None
+
+    @computed_field(description="上传者ID")
+    def uploaderid(self) -> int | None:
+        return self.uploader if self.uploader else None
 
 
 @router.post("/recording/create", response=RecordingSchemaOut)
@@ -454,3 +444,5 @@ def _calculate_word_count(text: str) -> int:
     english_words = re.findall(r'[a-zA-Z]+', cleaned_text)
     
     return len(chinese_chars) + len(english_words)
+
+    

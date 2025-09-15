@@ -7,7 +7,7 @@ from django.db import transaction
 from django.contrib.auth import get_user_model
 from ninja import Field, ModelSchema, Query, Router, Schema
 from ninja.pagination import paginate
-from meet.apis.recoding import RecordingSchemaOut
+from meet.apis.recording import RecordingSchemaOut
 from utils.usual import get_user_info_from_token
 from utils.anti_duplicate import anti_duplicate
 from system.models import File

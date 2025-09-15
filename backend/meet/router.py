@@ -1,6 +1,6 @@
 from ninja import Router
 from .apis.meeting import router as meeting_router
-from .apis.recoding import router as recording_router
+from .apis.recording import router as recording_router
 
 router = Router()
 

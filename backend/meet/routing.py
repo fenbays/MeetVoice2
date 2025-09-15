@@ -1,7 +1,9 @@
+"""
+主WebSocket路由配置
+"""
+import re
+from meet.apis.recording_ws import recording_websocket_urlpatterns
 
-from django.urls import re_path
-from . import consumers
-
-websocket_urlpatterns = [
-    re_path(r'ws/transcribe/(?P<meeting_id>[\w-]+)/$', consumers.TranscriptionConsumer.as_asgi()),
-]
+# 合并所有WebSocket路由模式
+websocket_urlpatterns = []
+websocket_urlpatterns.extend(recording_websocket_urlpatterns)
