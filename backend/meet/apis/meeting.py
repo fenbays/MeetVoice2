@@ -337,7 +337,7 @@ class SpeakerFilters(MeetFilters):
 
 
 class SpeakerSchemaIn(ModelSchema):
-    recording_id: int = Field(..., description="关联录音ID")
+    speakerid: int = Field(..., description="关联录音ID", alias="id")
     
     class Config:
         model = Speaker
@@ -348,24 +348,6 @@ class SpeakerSchemaOut(ModelSchema):
     class Config:
         model = Speaker
         model_fields = "__all__"
-
-
-@router.post("/speaker/create", response=SpeakerSchemaOut)
-def create_speaker(request, data: SpeakerSchemaIn):
-    """创建说话人"""
-    speaker_data = data.dict()
-    speaker_data['recording_id'] = speaker_data.pop('recording_id')
-    
-    speaker = create(request, speaker_data, Speaker)
-    return speaker
-
-
-@router.delete("/speaker/delete")
-def delete_speaker(request, speakerid: int = Query(...)):
-    """删除说话人"""
-    delete(speakerid, Speaker)
-    return {"success": True}
-
 
 @router.put("/speaker/update", response=SpeakerSchemaOut)
 def update_speaker(request, data: SpeakerSchemaIn):

@@ -107,10 +107,13 @@ class MeetingShare(CoreModel):
 
 
 class Recording(CoreModel):
+    
     """录音文件表"""
     meeting = models.ForeignKey(Meeting, on_delete=models.CASCADE, related_name='recordings', 
                                verbose_name="关联会议", help_text="关联会议")
     file = models.ForeignKey(File, on_delete=models.CASCADE, verbose_name="录音文件", help_text="录音文件")
+    name = models.CharField(max_length=200, blank=True, null=True, 
+                           verbose_name="录音名称", help_text="录音名称，默认为文件名")
     uploader = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name="recording_uploader",
                                 verbose_name="上传人", help_text="上传人")
     upload_location = models.CharField(max_length=200, blank=True, null=True, 
@@ -165,7 +168,7 @@ class Speaker(CoreModel):
     """说话人表"""
     recording = models.ForeignKey(Recording, on_delete=models.CASCADE, related_name='speakers',
                                  verbose_name="关联录音", help_text="关联录音")
-    speaker_id = models.CharField(max_length=50, verbose_name="说话人标识", 
+    speaker_sequence = models.CharField(max_length=50, verbose_name="说话人标识", 
                                  help_text="AI识别的说话人标识（如：说话人1、说话人2）")
     
     # 用户后续可填写的信息
@@ -178,11 +181,11 @@ class Speaker(CoreModel):
         db_table = "meet_speaker"
         verbose_name = "说话人"
         verbose_name_plural = verbose_name
-        unique_together = ['recording', 'speaker_id']
-        ordering = ['recording', 'speaker_id']
+        unique_together = ['recording', 'speaker_sequence']
+        ordering = ['recording', 'speaker_sequence']
     
     def __str__(self):
-        return self.speaker_id or "未命名说话人"
+        return self.speaker_sequence or "未命名说话人"
 
 
 class TranscriptSegment(CoreModel):

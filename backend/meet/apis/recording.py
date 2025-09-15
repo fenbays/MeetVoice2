@@ -1,9 +1,15 @@
 from typing import List
 import traceback
 
+import mimetypes
+import zipfile
+import tempfile
+from django.http import FileResponse
+from django.conf import settings
 from django.shortcuts import get_object_or_404
 from django.db import transaction
 from django.contrib.auth import get_user_model
+from urllib.parse import quote
 from ninja import Field, ModelSchema, Query, Router
 from pydantic import computed_field
 from utils.usual import get_user_info_from_token
@@ -15,7 +21,9 @@ from utils.meet_response import MeetResponse, MeetError, BusinessCode
 from meet.permissions import (
     require_meeting_view_permission,
     require_meeting_owner,
-    get_user_meetings_queryset
+    get_user_meetings_queryset,
+    require_recording_owner,
+    require_recording_view_permission
 )
 from utils.meet_response import MeetResponse
 import logging
@@ -105,19 +113,30 @@ class RecordingFilters(MeetFilters):
     uploader_id: int = Field(None, alias="uploader_id")
 
 
-class RecordingSchemaIn(ModelSchema):
-    meetingid: int = Field(..., description="会议ID")
+class RecordingUpdateSchemaIn(ModelSchema):
+    recordingid: int = Field(..., description="录音ID")
+    name: str = Field(None, description="录音名称")
     keywords: str = Field(None, description="录音关键词")
+    upload_location: str = Field(None, description="上传地点")
 
     class Config:
         model = Recording
-        model_exclude = ['id', 'meeting', 'file', 'uploader', 'create_datetime', 'update_datetime']
+        model_exclude = ['id', 'meeting', 'file', 'uploader', 'create_datetime', 'update_datetime', 'process_status']
 
 
 class RecordingSchemaOut(ModelSchema):
     class Config:
         model = Recording
         model_fields = "__all__"
+
+    @computed_field(description="处理状态")
+    def status_text(self) -> str | None:
+        if self.process_status is not None:
+            # 从 PROCESS_STATUS_CHOICES 中获取对应的显示文本
+            for status_value, status_display in Recording.PROCESS_STATUS_CHOICES:
+                if status_value == self.process_status:
+                    return status_display
+        return None
 
     @computed_field(description="会议ID")
     def meetingid(self) -> int | None:
@@ -146,15 +165,17 @@ def create_recording(request, meetingid: int=Query(...)):
         except Meeting.DoesNotExist:
             raise MeetError('会议不存在', BusinessCode.INSTANCE_NOT_FOUND.value)
 
-        # 检查是否有上传的文件
+        if meeting.status == 3:
+            raise MeetError('会议已取消，无法上传录音', BusinessCode.BUSINESS_ERROR.value)
+
+        if meeting.status == 2:
+            raise MeetError('会议已结束，无法上传录音', BusinessCode.BUSINESS_ERROR.value)
+
         if 'audio' not in request.FILES:
             raise MeetError('没有上传音频文件', BusinessCode.BUSINESS_ERROR.value)
 
         audio_file = request.FILES['audio']
-
-        # 使用新的验证函数
         file_info = validate_audio_file(audio_file)
-
         request_user = get_user_info_from_token(request)
 
         # 使用事务确保数据一致性
@@ -166,9 +187,10 @@ def create_recording(request, meetingid: int=Query(...)):
             recording = Recording.objects.create(
                 meeting=meeting,
                 file=file_record,
+                name=file_info['name'],
                 uploader_id=request_user['id'],
-                duration=None,  # 将在处理时计算
-                process_status=0  # 未处理
+                duration=None,
+                process_status=0
             )
 
             # 3. 启动后台处理任务
@@ -177,18 +199,7 @@ def create_recording(request, meetingid: int=Query(...)):
 
             logger.info(f'音频文件上传成功，录音ID: {recording.id}, 任务ID: {task.id}, 上传者ID: {request_user["id"]}')
 
-            # 4. 返回录音信息
-            return MeetResponse(data={
-                'recording_id': recording.id,
-                'task_id': task.id,
-                'meeting_id': meetingid,
-                'meeting_title': meeting.title,
-                'file_name': file_info['name'],
-                'file_size': file_info['size'],
-                'uploader_id': request_user["id"],
-                'status': 'processing',
-                'status_url': f'/api/transcription/status/{recording.id}/'
-            }, errcode=BusinessCode.OK)
+            return recording
 
     except MeetError as e:
         raise e
@@ -197,57 +208,62 @@ def create_recording(request, meetingid: int=Query(...)):
         logger.error(f'错误详情: {traceback.format_exc()}')
         raise MeetError('服务器错误，上传失败', BusinessCode.SERVER_ERROR.value)
 
-@router.delete("/recording/delete")
-@require_meeting_owner  # 只有会议所有者可以删除录音
+@router.post("/recording/update", response=RecordingSchemaOut)
+@require_recording_owner
+def update_recording(request, data: RecordingUpdateSchemaIn):
+    """
+    更新录音信息接口
+    只有会议所有者可以更新录音信息
+    """
+    try:
+        # 获取录音对象
+        recording = get_object_or_404(Recording, id=data.recordingid)
+        meeting = recording.meeting
+        
+        # 验证会议状态
+        if meeting.status == 2:
+            raise MeetError('会议已结束，无法修改录音信息', BusinessCode.BUSINESS_ERROR.value)
+        if meeting.status == 3:
+            raise MeetError('会议已取消，无法修改录音信息', BusinessCode.BUSINESS_ERROR.value)
+        
+        # 更新录音信息
+        update_data = data.dict(exclude_unset=True)  # 只更新提供的字段
+        for field, value in update_data.items():
+            if hasattr(recording, field):
+                setattr(recording, field, value)
+        
+        recording.save()
+        
+        logger.info(f'录音信息更新成功，录音ID: {recording.id}, 更新字段: {list(update_data.keys())}')
+        return recording
+        
+    except MeetError as e:
+        raise e
+    except Exception as e:
+        logger.error(f'录音信息更新失败: {e}')
+        raise MeetError('服务器错误，更新失败', BusinessCode.SERVER_ERROR.value)
+
+@router.get("/recording/delete")
+@require_recording_owner
 def delete_recording(request, recordingid: int=Query(...)):
     """删除录音文件"""
     # 获取录音对象
     recording = get_object_or_404(Recording, id=recordingid)
+    meeting = recording.meeting
+    if meeting.status == 2:
+        raise MeetError('会议已结束，无法删除录音', BusinessCode.BUSINESS_ERROR.value)
+    
+    if meeting.status == 3:
+        raise MeetError('会议已取消，无法删除录音', BusinessCode.BUSINESS_ERROR.value)
 
-    # 删除关联的文件
     if recording.file:
         recording.file.delete()  # 这会同时删除物理文件
 
     delete(recordingid, Recording)
     return MeetResponse(errcode=BusinessCode.OK)
 
-# @router.get("/meeting/recording/list", response=List[RecordingSchemaOut])
-# @require_meeting_view_permission
-# @paginate(MyPagination)
-# def list_recording(request, filters: RecordingFilters = Query(...)):
-#     """分页获取会议录音列表"""
-#     request_user = get_user_info_from_token(request)
-#     # 获取用户可访问的会议ID列表
-#     accessible_meetings = get_user_meetings_queryset(
-#         get_object_or_404(User, id=request_user['id'])
-#     ).values_list('id', flat=True)
-
-#     # 基于filters获取查询集
-#     qs = retrieve(request, Recording, filters)
-
-#     # 过滤只返回用户有权限访问的会议的录音
-#     qs = qs.filter(meeting_id__in=accessible_meetings)
-
-#     return qs
-
-@router.get("/recording/get", response=RecordingSchemaOut)
-@require_meeting_view_permission  # 需要会议查看权限
-def get_recording(request, recordingid: int=Query(...)):
-    """获取录音详情"""
-    recording = get_object_or_404(Recording, id=recordingid)
-
-    # 验证用户是否有权限访问该录音所属的会议
-    request_user = get_user_info_from_token(request)
-    user_obj = get_object_or_404(User, id=request_user['id'])
-
-    accessible_meetings = get_user_meetings_queryset(user_obj).values_list('id', flat=True)
-    if recording.meeting_id not in accessible_meetings:
-        raise MeetError('无权访问该录音', BusinessCode.PERMISSION_DENIED)
-
-    return recording
-
 @router.get("/meeting/recording/list", response=List[RecordingSchemaOut])
-@require_meeting_view_permission  # 需要会议查看权限
+@require_meeting_view_permission
 def list_meeting_recordings(request, meetingid: int=Query(...)):
     """获取指定会议的所有录音"""
     meeting = get_object_or_404(Meeting, id=meetingid)
@@ -255,7 +271,8 @@ def list_meeting_recordings(request, meetingid: int=Query(...)):
     return list(recordings)
 
 
-@router.get("/recording/transcription/status")
+@router.get("/recording/get")
+@require_recording_view_permission
 def get_processing_status(request, recordingid: int=Query(...)):
     """
     获取录音处理的状态信息接口
@@ -308,7 +325,7 @@ def get_processing_status(request, recordingid: int=Query(...)):
         # 根据处理状态添加详细信息
         if recording.process_status == 2:  # 已完成
             # 获取说话人信息
-            speakers = recording.speakers.all().order_by('speaker_id')
+            speakers = recording.speakers.all().order_by('speaker_sequence')
             
             # 获取转录片段，优化查询性能
             transcripts = recording.transcripts.select_related('speaker').order_by('start_time')
@@ -317,8 +334,9 @@ def get_processing_status(request, recordingid: int=Query(...)):
             speakers_list = []
             for speaker in speakers:
                 speakers_list.append({
-                    'speaker_id': speaker.speaker_id,
-                    'name': speaker.name or speaker.speaker_id,
+                    'speakerid': speaker.id,
+                    'speaker_sequence': speaker.speaker_sequence,
+                    'speaker_name': speaker.name or speaker.speaker_id,
                     'title': speaker.title,
                     'department': speaker.department,
                     'company': speaker.company,
@@ -328,7 +346,7 @@ def get_processing_status(request, recordingid: int=Query(...)):
             
             # 构建转录文本（完整版本）
             full_transcription = '\n'.join([
-                f"[{segment.start_time.strftime('%H:%M:%S')}] {segment.speaker.speaker_id}: {segment.text}"
+                f"[{segment.start_time.strftime('%H:%M:%S')}] {segment.speaker.speaker_sequence}: {segment.text}"
                 for segment in transcripts
             ])
             
@@ -336,8 +354,9 @@ def get_processing_status(request, recordingid: int=Query(...)):
             segments_list = []
             for segment in transcripts:
                 segments_list.append({
-                    'segment_id': segment.id,
-                    'speaker_id': segment.speaker.speaker_id,
+                    'segmentid': segment.id,
+                    'speakerid': segment.speaker.id,
+                    'speaker_sequence': segment.speaker.speaker_id,
                     'speaker_name': segment.speaker.name or segment.speaker.speaker_id,
                     'start_time': segment.start_time.strftime('%H:%M:%S.%f')[:-3],
                     'end_time': segment.end_time.strftime('%H:%M:%S.%f')[:-3],
@@ -373,14 +392,14 @@ def get_processing_status(request, recordingid: int=Query(...)):
                 }
             })
             
-        elif recording.process_status == 3:  # 处理失败
+        elif recording.process_status == 3:
             response_data.update({
                 'error': '处理失败，请重试或联系管理员',
                 'error_details': '音频文件处理过程中出现错误，请检查文件格式或重新上传',
                 'retry_url': f'/api/transcription/retry/{recording.id}/'
             })
             
-        elif recording.process_status == 1:  # 处理中
+        elif recording.process_status == 1: 
             # 可以添加处理进度信息（如果有的话）
             response_data.update({
                 'progress_info': '音频文件正在处理中，请稍候...',
@@ -397,6 +416,209 @@ def get_processing_status(request, recordingid: int=Query(...)):
         logger.error(f'获取处理状态失败: {e}')
         logger.error(f'错误详情: {traceback.format_exc()}')
         raise MeetError('服务器错误，获取状态失败', BusinessCode.SERVER_ERROR)
+    
+@router.get("/recording/download")
+@require_recording_view_permission
+def download_recording_file(request, recordingid: int=Query(...)):
+    """
+    下载录音文件接口 - 直接返回文件流
+    GET /api/recording/download?recordingid=123
+    
+    参数:
+    - recordingid: 录音ID，必填
+    """
+    try:
+        # 获取录音记录
+        recording = Recording.objects.select_related('meeting', 'file').get(id=recordingid)    
+
+        if not recording.file:
+            raise MeetError('原始录音文件不存在', BusinessCode.INSTANCE_NOT_FOUND.value)
+        
+        file_path = recording.file.url.path
+        
+        # 检查文件是否存在
+        if not os.path.exists(file_path):
+            raise MeetError('录音文件不存在', BusinessCode.INSTANCE_NOT_FOUND.value)
+        
+        # 记录下载请求日志
+        request_user = get_user_info_from_token(request)
+        logger.info(f'用户 {request_user["id"]} 下载录音文件: {recordingid}, 文件: {recording.file.name}')
+        
+        # 构建下载文件名：会议名_录音文件名
+        meeting_title = recording.meeting.title if recording.meeting.title else "未命名会议"
+        # 清理文件名中的特殊字符，避免文件系统问题
+        safe_meeting_title = "".join(c for c in meeting_title if c.isalnum() or c in (' ', '-', '_')).strip()
+        safe_meeting_title = safe_meeting_title.replace(' ', '_')
+        
+        # 获取原始文件扩展名
+        original_filename = recording.file.name
+        
+        # 构建新的下载文件名
+        download_filename = f"{safe_meeting_title}_{recording.id}_{os.path.basename(recording.file.name)}"
+        download_filename_quoted = quote(download_filename)
+
+        # 获取文件MIME类型
+        content_type, _ = mimetypes.guess_type(file_path)
+        if not content_type:
+            if recording.file.name.lower().endswith('.wav'):
+                content_type = 'audio/wav'
+            elif recording.file.name.lower().endswith('.mp3'):
+                content_type = 'audio/mpeg'
+            elif recording.file.name.lower().endswith('.m4a'):
+                content_type = 'audio/mp4'
+            else:
+                content_type = 'application/octet-stream'
+        
+        response = FileResponse(
+            open(file_path, 'rb'),
+            content_type=content_type,
+            as_attachment=True,
+        )
+
+        response['Content-Disposition'] = f'attachment; filename="{download_filename_quoted}"'
+        
+        # 设置文件大小
+        response['Content-Length'] = os.path.getsize(file_path)        
+        # 支持断点续传
+        response['Accept-Ranges'] = 'bytes'
+        
+        return response
+        
+    except Recording.DoesNotExist:
+        raise MeetError('录音记录不存在', BusinessCode.INSTANCE_NOT_FOUND.value)
+    except MeetError:
+        raise
+    except Exception as e:
+        logger.error(f'下载录音文件失败: {e}')
+        logger.error(f'错误详情: {traceback.format_exc()}')
+        raise MeetError('服务器错误，下载文件失败', BusinessCode.SERVER_ERROR.value)
+
+@router.get("/recording/download/batch")
+@require_meeting_view_permission
+def batch_download_recordings_zip(request, meetingid: int=Query(...), file_type: str=Query("original")):
+    """
+    批量下载会议录音文件接口 - 直接返回ZIP文件
+    GET /api/recording/download/batch/zip?meetingid=123
+    
+    参数:
+    - meetingid: 会议ID，必填
+    - file_type: 文件类型，默认为"original"
+    
+    功能说明:
+    1. 获取会议下所有录音文件
+    2. 将所有录音文件打包成ZIP文件
+    3. 直接返回ZIP文件供下载
+    """
+    try:
+        # 获取会议下的所有录音
+        meeting = Meeting.objects.get(id=meetingid)
+        recordings = Recording.objects.filter(meeting=meeting).order_by('-create_datetime')
+        
+        if not recordings.exists():
+            raise MeetError('该会议没有录音文件', BusinessCode.INSTANCE_NOT_FOUND.value)
+        
+        # 记录批量下载请求日志
+        request_user = get_user_info_from_token(request)
+        logger.info(f'用户 {request_user["id"]} 请求批量下载ZIP文件，会议: {meetingid}，类型: {file_type}')
+        
+        # 创建临时ZIP文件
+        temp_zip = tempfile.NamedTemporaryFile(delete=False, suffix='.zip')
+        temp_zip.close()
+        
+        try:
+            with zipfile.ZipFile(temp_zip.name, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                added_files = 0
+                total_size = 0
+                
+                for recording in recordings:
+                    try:
+                        if not recording.file:
+                            logger.warning(f'录音 {recording.id} 没有文件，跳过')
+                            continue
+                            
+                        file_path = recording.file.url.path
+                        
+                        # 检查文件是否存在
+                        if not os.path.exists(file_path):
+                            logger.warning(f'录音文件不存在: {file_path}')
+                            continue
+                        
+                        # 构建ZIP内的文件名
+                        meeting_title = recording.meeting.title if recording.meeting.title else "未命名会议"
+                        safe_meeting_title = "".join(c for c in meeting_title if c.isalnum() or c in (' ', '-', '_')).strip()
+                        safe_meeting_title = safe_meeting_title.replace(' ', '_')
+                        
+                        # 获取原始文件名和扩展名
+                        original_filename = recording.file.name
+                        
+                        # 构建ZIP内的文件名：会议名_录音ID_原始文件名
+                        zip_filename = f"{safe_meeting_title}_{recording.id}_{os.path.basename(original_filename)}"
+                        
+                        # 添加到ZIP文件
+                        zip_file.write(file_path, zip_filename)
+                        added_files += 1
+                        total_size += os.path.getsize(file_path)
+                        
+                        logger.debug(f'已添加文件到ZIP: {zip_filename}')
+                        
+                    except Exception as e:
+                        logger.warning(f'处理录音 {recording.id} 时出错: {e}')
+                        continue
+                
+                if added_files == 0:
+                    raise MeetError('没有可下载的录音文件', BusinessCode.INSTANCE_NOT_FOUND.value)
+                
+                logger.info(f'ZIP文件创建完成，包含 {added_files} 个文件，总大小: {total_size} 字节')
+        
+        except Exception as e:
+            # 清理临时文件
+            if os.path.exists(temp_zip.name):
+                os.unlink(temp_zip.name)
+            raise e
+        
+        # 构建下载文件名
+        safe_meeting_title = "".join(c for c in meeting.title if c.isalnum() or c in (' ', '-', '_')).strip() if meeting.title else "未命名会议"
+        safe_meeting_title = safe_meeting_title.replace(' ', '_')
+        zip_download_name = f"{safe_meeting_title}_录音文件_{added_files}个文件.zip"
+        zip_download_name_quoted = quote(zip_download_name)
+        
+        # 使用FileResponse返回ZIP文件
+        response = FileResponse(
+            open(temp_zip.name, 'rb'),
+            content_type='application/zip',
+            as_attachment=True,
+        )
+        
+        response['Content-Disposition'] = f'attachment; filename="{zip_download_name_quoted}"'
+        response['Accept-Ranges'] = 'bytes'
+        
+        # 设置文件大小
+        response['Content-Length'] = os.path.getsize(temp_zip.name)
+        
+        # 添加清理临时文件的回调
+        def cleanup_temp_file():
+            try:
+                if os.path.exists(temp_zip.name):
+                    os.unlink(temp_zip.name)
+            except Exception as e:
+                logger.warning(f'清理临时文件失败: {e}')
+        
+        # 在响应关闭时清理临时文件
+        response.closed = cleanup_temp_file
+        
+        logger.info(f'用户 {request_user["id"]} 成功下载ZIP文件: {zip_download_name}')
+        
+        return response
+        
+    except Meeting.DoesNotExist:
+        raise MeetError('会议不存在', BusinessCode.INSTANCE_NOT_FOUND.value)
+    except MeetError:
+        raise
+    except Exception as e:
+        logger.error(f'批量下载ZIP文件失败: {e}')
+        logger.error(f'错误详情: {traceback.format_exc()}')
+        raise MeetError('服务器错误，批量下载ZIP文件失败', BusinessCode.SERVER_ERROR.value)
+
 
 def _calculate_speaker_total_time(speaker: Speaker) -> int:
     """计算说话人总发言时间（秒）"""

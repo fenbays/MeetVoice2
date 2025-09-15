@@ -152,7 +152,7 @@ def generate_meeting_summary(self, recording_id):
                 f"[{segment.start_time.strftime('%H:%M:%S')} - {segment.end_time.strftime('%H:%M:%S')}] {segment.text}"
                 for segment in segments
             ])
-            speakers_segments[speaker.speaker_id] = speaker_text
+            speakers_segments[speaker.speaker_sequence] = speaker_text
 
         user_prompt = f"""这是一段会议记录的文本，请帮我总结会议纪要：
 
@@ -165,8 +165,8 @@ def generate_meeting_summary(self, recording_id):
 各位参会者发言记录：
 """
         
-        for speaker_id, text in speakers_segments.items():
-            user_prompt += f"\n说话人{speaker_id}的发言：\n{text}\n"
+        for speaker_sequence, text in speakers_segments.items():
+            user_prompt += f"\n说话人{speaker_sequence}的发言：\n{text}\n"
 
         # 5. 首先尝试使用DeepSeek API
         try:
@@ -266,16 +266,16 @@ def _save_processing_results(recording, result):
     
     # 2. 创建说话人
     speakers_map = {}
-    for speaker_id, speaker_data in result.get('speakers', {}).items():
+    for speaker_sequence, speaker_data in result.get('speakers', {}).items():
         speaker = Speaker.objects.create(
             recording=recording,
-            speaker_id=str(speaker_id)
+            speaker_sequence=str(speaker_sequence)
         )
-        speakers_map[str(speaker_id)] = speaker
+        speakers_map[str(speaker_sequence)] = speaker
     
     # 3. 保存转录片段
-    for speaker_id, speaker_data in result.get('speakers', {}).items():
-        speaker = speakers_map.get(str(speaker_id))
+    for speaker_sequence, speaker_data in result.get('speakers', {}).items():
+        speaker = speakers_map.get(str(speaker_sequence))
         
         if speaker and 'segments' in speaker_data:
             for segment_data in speaker_data['segments']:

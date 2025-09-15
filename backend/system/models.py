@@ -229,9 +229,9 @@ class File(CoreModel):
         md5sum = md5_hash.hexdigest()
         
         # 2. 检查是否已存在相同文件
-        existing = cls.objects.filter(md5sum=md5sum).first()
-        if existing:
-            return existing
+        # existing = cls.objects.filter(md5sum=md5sum).first()
+        # if existing:
+        #     return existing
         
         # 3. 生成安全的随机文件名
         ext = os.path.splitext(file_obj.name)[1].lower()

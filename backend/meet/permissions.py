@@ -12,15 +12,14 @@ from utils.usual import get_user_info_from_token
 from utils.meet_response import MeetError, BusinessCode
 
 
-def _extract_meeting_id(request, *args, **kwargs):
-    """智能提取meeting_id，支持URL参数和请求体"""
+def _extract_meeting_id_from_meeting(request, *args, **kwargs):
+    """从meetingid参数中提取meeting_id"""
     meeting_id = None
     
     # 1. 首先尝试从URL路径参数获取
     if 'meetingid' in kwargs:
         meeting_id = kwargs['meetingid']
     elif len(args) > 0:
-        # 检查第一个位置参数是否为meeting_id（兼容旧接口）
         meeting_id = args[0]
     
     # 2. 如果URL中没有，尝试从请求体获取
@@ -32,7 +31,7 @@ def _extract_meeting_id(request, *args, **kwargs):
         except (json.JSONDecodeError, AttributeError):
             pass
     
-    # 3. 最后尝试从查询参数获取（用于GET请求）
+    # 3. 最后尝试从查询参数获取
     if meeting_id is None and hasattr(request, 'GET'):
         meeting_id = request.GET.get('meetingid')
     
@@ -45,11 +44,52 @@ def _extract_meeting_id(request, *args, **kwargs):
         raise MeetError("meetingid必须为数字", BusinessCode.BUSINESS_ERROR)
 
 
+def _extract_meeting_id_from_recording(request, *args, **kwargs):
+    """从recordingid参数中提取meeting_id，支持多种获取方式"""
+    recording_id = None
+    
+    # 1. 首先尝试从URL路径参数获取
+    if 'recordingid' in kwargs:
+        recording_id = kwargs['recordingid']
+    elif len(args) > 0:
+        # 检查第一个位置参数是否为recording_id（兼容旧接口）
+        recording_id = args[0]
+    
+    # 2. 如果URL中没有，尝试从请求体获取
+    if recording_id is None:
+        try:
+            if hasattr(request, 'body') and request.body:
+                body = json.loads(request.body)
+                recording_id = body.get('recordingid')
+        except (json.JSONDecodeError, AttributeError):
+            pass
+    
+    # 3. 最后尝试从查询参数获取（用于GET请求）
+    if recording_id is None and hasattr(request, 'GET'):
+        recording_id = request.GET.get('recordingid')
+    
+    if recording_id is None:
+        raise MeetError("缺少recordingid参数", BusinessCode.BUSINESS_ERROR)
+    
+    try:
+        recording_id = int(recording_id)
+    except (ValueError, TypeError):
+        raise MeetError("recordingid必须为数字", BusinessCode.BUSINESS_ERROR)
+    
+    try:
+        from meet.models import Recording
+        recording = Recording.objects.select_related('meeting').get(id=recording_id)
+        # 将recording对象添加到kwargs中，方便后续使用
+        kwargs['recording'] = recording
+        return recording.meeting.id
+    except Recording.DoesNotExist:
+        raise MeetError("录音不存在", BusinessCode.INSTANCE_NOT_FOUND)
+
 def require_meeting_edit_permission(view_func):
     """要求会议编辑权限的装饰器（智能获取meeting_id）"""
     @wraps(view_func)
     def wrapper(request, *args, **kwargs):
-        meeting_id = _extract_meeting_id(request, *args, **kwargs)
+        meeting_id = _extract_meeting_id_from_meeting(request, *args, **kwargs)
         meeting = get_object_or_404(Meeting, id=meeting_id)
         request_user = get_user_info_from_token(request)
         user_obj = Users.objects.get(id=request_user.get('id'))
@@ -71,7 +111,7 @@ def require_meeting_view_permission(view_func):
     """要求会议查看权限的装饰器（智能获取meeting_id）"""
     @wraps(view_func)
     def wrapper(request, *args, **kwargs):
-        meeting_id = _extract_meeting_id(request, *args, **kwargs)
+        meeting_id = _extract_meeting_id_from_meeting(request, *args, **kwargs)
         meeting = get_object_or_404(Meeting, id=meeting_id)
         request_user = get_user_info_from_token(request)
         user_obj = Users.objects.get(id=request_user.get('id'))
@@ -92,7 +132,7 @@ def require_meeting_owner(view_func):
     """要求会议所属人权限的装饰器（智能获取meeting_id）"""
     @wraps(view_func)
     def wrapper(request, *args, **kwargs):
-        meeting_id = _extract_meeting_id(request, *args, **kwargs)
+        meeting_id = _extract_meeting_id_from_meeting(request, *args, **kwargs)
         meeting = get_object_or_404(Meeting, id=meeting_id)
         request_user = get_user_info_from_token(request)
         user_obj = Users.objects.get(id=request_user.get('id'))
@@ -104,6 +144,41 @@ def require_meeting_owner(view_func):
         sig = inspect.signature(view_func)
         if 'meetingid' in sig.parameters:
             kwargs['meetingid'] = meeting_id
+            
+        return view_func(request, *args, **kwargs)
+    return wrapper
+
+def require_recording_owner(view_func):
+    """要求录音所属会议的所有者权限的装饰器（必须通过recordingid）"""
+    @wraps(view_func)
+    def wrapper(request, *args, **kwargs):      
+        meeting_id = _extract_meeting_id_from_recording(request, *args, **kwargs)
+        meeting = get_object_or_404(Meeting, id=meeting_id)
+        request_user = get_user_info_from_token(request)
+        user_obj = Users.objects.get(id=request_user.get('id'))
+        
+        if meeting.owner != user_obj:
+            raise MeetError("仅会议所属人可执行此操作", BusinessCode.PERMISSION_DENIED)
+            
+        return view_func(request, *args, **kwargs)
+    return wrapper
+
+
+def require_recording_view_permission(view_func):
+    """要求录音查看权限的装饰器（必须通过recordingid）"""
+    @wraps(view_func)
+    def wrapper(request, *args, **kwargs):
+        # 强制要求recordingid参数
+        if 'recordingid' not in kwargs:
+            raise MeetError("此接口必须通过recordingid参数调用", BusinessCode.BUSINESS_ERROR)
+        
+        meeting_id = _extract_meeting_id_from_recording(request, *args, **kwargs)
+        meeting = get_object_or_404(Meeting, id=meeting_id)
+        request_user = get_user_info_from_token(request)
+        user_obj = Users.objects.get(id=request_user.get('id'))
+        
+        if not meeting.user_can_view(user_obj):
+            raise MeetError("无权限查看此录音", BusinessCode.PERMISSION_DENIED)
             
         return view_func(request, *args, **kwargs)
     return wrapper

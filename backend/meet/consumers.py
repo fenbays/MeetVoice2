@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 class TranscriptionConsumer(AsyncWebsocketConsumer):
     async def connect(self):
         """初始化连接"""
+        self.connected = True  # 连接状态标记
         self.session_id = self.scope['url_route']['kwargs']['meeting_id']
         self.room_group_name = f'transcribe_{self.session_id}'
         
@@ -63,13 +64,14 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
     
     async def disconnect(self, close_code):
         """断开连接"""
-        logger.info(f"会话 {self.session_id} 开始断开连接: {close_code}")
+        self.connected = False
+        logger.info(f"会话 {self.session_id} 断开连接: {close_code}")
         self.transcription_active = False
         
         try:
             # 1. 停止结果处理任务
             if hasattr(self, 'result_handler_task') and not self.result_handler_task.done():
-                logger.info("断开连接时取消结果处理任务")
+                logger.info("取消结果处理任务")
                 self.result_handler_task.cancel()
                 try:
                     await self.result_handler_task
@@ -78,7 +80,14 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
                 except Exception as e:
                     logger.error(f"结果处理任务取消失败: {e}")
             
-            # 2. 安全清理AudioProcessor
+            # 2. 确保关闭结果生成器
+            if hasattr(self, 'results_generator'):
+                try:
+                    await self.results_generator.aclose()
+                except Exception as e:
+                    logger.error(f"关闭结果生成器失败: {e}")
+                
+            # 3. 安全清理AudioProcessor
             if hasattr(self, 'audio_processor') and self.audio_processor is not None:
                 try:
                     logger.info("断开连接时清理AudioProcessor")
@@ -88,10 +97,10 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
                 finally:
                     self.audio_processor = None
             
-            # 3. 清理其他资源
+            # 4. 清理其他资源
             await self.cleanup_resources()
             
-            # 4. 离开群组
+            # 5. 离开群组
             await self.channel_layer.group_discard(
                 self.room_group_name,
                 self.channel_name
@@ -188,7 +197,7 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
                 'message': '正在加载AI模型...'
             }))
             
-            # 2. 等待模型准备完成 (模拟2秒加载时间)
+            # 2. 等待模型准备完成 
             logger.info("开始加载模型...")
             
             # 检查AudioProcessor是否有模型准备方法
@@ -198,7 +207,7 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
                     raise Exception("模型准备失败")
             else:
                 # 模拟模型加载时间
-                await asyncio.sleep(2)
+                await asyncio.sleep(15)
             
             logger.info("模型加载完成")
             
@@ -378,6 +387,13 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
         """处理AudioProcessor的结果流"""
         try:
             async for result in self.results_generator:
+                # 检查连接状态
+                if not self.transcription_active or not self.connected:
+                    logger.info("转录已停止或连接已关闭，停止处理结果")
+                    # 正确关闭生成器
+                    await self.results_generator.aclose()
+                    break
+                    
                 if result.get('status') == 'error':
                     await self.send_error(result.get('message', '音频处理错误'))
                 else:
@@ -386,8 +402,25 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
                         'type': 'processing_status',
                         'data': result
                     }))
+        except asyncio.CancelledError:
+            logger.info("结果处理任务被取消")
+            # 确保在任务取消时也关闭生成器
+            await self.results_generator.aclose()
+            raise  # 重新抛出取消异常
         except Exception as e:
             logger.error(f"结果处理失败: {e}")
+            # 确保在发生错误时也关闭生成器
+            try:
+                await self.results_generator.aclose()
+            except Exception as close_error:
+                logger.error(f"关闭结果生成器时发生错误: {close_error}")
+        finally:
+            # 确保在所有情况下都尝试关闭生成器
+            try:
+                if hasattr(self, 'results_generator'):
+                    await self.results_generator.aclose()
+            except Exception as e:
+                logger.error(f"清理结果生成器时发生错误: {e}")
 
     async def _handle_transcription_result(self, result: dict):
         """处理转录结果回调"""
@@ -613,11 +646,16 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
         }))
     
     async def send_error(self, message):
-        """发送错误消息"""
-        await self.send(text_data=json.dumps({
-            'type': 'error',
-            'message': message
-        }))
+        if not self.connected:
+            logger.warning(f"尝试在关闭的连接上发送错误消息: {message}")
+            return
+        try:
+            await self.send(text_data=json.dumps({
+                'type': 'error',
+                'message': message
+            }))
+        except Exception as e:
+            logger.error(f"发送错误消息失败: {e}")
     
     @database_sync_to_async
     def get_meeting(self, meeting_id):
