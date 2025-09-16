@@ -161,19 +161,16 @@ def create_recording(request, meetingid: int=Query(...)):
     """
     上传音频文件接口
     只有会议所有者可以上传音频文件
+    一场会议只能上传一个录音文件
     """
     try:
         # 验证会议是否存在
-        try:
-            meeting = Meeting.objects.get(id=meetingid)
-        except Meeting.DoesNotExist:
-            raise MeetError('会议不存在', BusinessCode.INSTANCE_NOT_FOUND.value)
+        meeting = get_object_or_404(Meeting, id=meetingid)
 
-        if meeting.status == 3:
-            raise MeetError('会议已取消，无法上传录音', BusinessCode.BUSINESS_ERROR.value)
-
-        if meeting.status == 2:
-            raise MeetError('会议已结束，无法上传录音', BusinessCode.BUSINESS_ERROR.value)
+         # 检查是否可以上传
+        can_upload, message = meeting.can_upload_recording()
+        if not can_upload:
+            raise MeetError(message, BusinessCode.BUSINESS_ERROR.value)
 
         if 'audio' not in request.FILES:
             raise MeetError('没有上传音频文件', BusinessCode.BUSINESS_ERROR.value)

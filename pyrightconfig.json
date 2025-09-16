@@ -13,5 +13,10 @@
                 "../third_party/FunASR"
             ]
         }
+    ],
+    "typeCheckingMode": "basic",
+    "reportMissingTypeStubs": false,
+    "python.analysis.stubPaths": [
+      "./typings"
     ]
 }

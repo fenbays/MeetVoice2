@@ -133,12 +133,6 @@ def get_meeting(request, meetingid: int=Query(...)):
     meeting = get_object_or_404(Meeting, id=meetingid)
     return meeting
 
-    # try:
-    #     meeting = Meeting.objects.get(id=meetingid)
-    # except Meeting.DoesNotExist:
-    #     raise MeetError("会议不存在", BusinessCode.INSTANCE_NOT_FOUND.value)
-    # return meeting
-
 @router.post("/meeting/update", response=MeetingSchemaOut)
 @require_meeting_permission('owner')
 def update_meeting(request, data: MeetingSchemaIn):
@@ -177,12 +171,17 @@ def list_meeting(request, filters: MeetingFilters):
     
     return qs
 
-@router.get("/meeting/delete")
+class MeetingDeleteSchemaIn(Schema):
+    """删除会议Schema"""
+    meetingid: int = Field(..., description="会议ID")
+
+@router.post("/meeting/delete")
 @require_meeting_permission('owner')
-def delete_meeting(request, meetingid: int=Query(...)):
+def delete_meeting(request, data: MeetingDeleteSchemaIn):
     """删除会议（需要编辑权限）"""
-    delete(meetingid, Meeting)
+    delete(data.meetingid, Meeting)
     return MeetResponse(errcode=BusinessCode.OK)
+
 
 class EnumItemSchema(Schema):
     value: str | int

@@ -42,6 +42,29 @@ class Meeting(CoreModel):
     owner = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, 
                              related_name="owned_meetings",
                              verbose_name="所属人", help_text="会议所属人")
+
+    def can_upload_recording(self):
+        """检查是否可以上传录音"""
+        # 1. 检查会议状态
+        if self.status in [2, 3]:  # 已结束或已取消
+            return False, "会议已结束或已取消，无法上传录音"
+        
+        # 2. 检查是否已有录音
+        if self.recordings.filter(process_status__in=[0, 1, 2]).exists():
+            return False, "该会议已有录音文件，无法上传新录音"
+        
+        return True, "可以上传录音"
+    
+    def get_recording(self):
+        """获取会议的唯一录音文件"""
+        return self.recordings.filter(process_status__in=[0, 1, 2]).first()
+    
+    def get_transcript_segments(self):
+        """获取按时间排序的转录片段"""
+        recording = self.get_recording()
+        if not recording:
+            return Segment.objects.none()
+        return recording.transcripts.order_by('start_time')
     
     def user_can_edit(self, user):
         """只有所属人可以编辑（删除用户后无人可编辑，符合预期）"""
