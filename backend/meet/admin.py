@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Meeting, Recording, Speaker, MeetingSummary, TranscriptSegment, MeetingShare
+from .models import Meeting, Recording, Speaker, MeetingSummary, Segment, MeetingShare
 
 @admin.register(Meeting)
 class MeetingAdmin(admin.ModelAdmin):
@@ -8,7 +8,7 @@ class MeetingAdmin(admin.ModelAdmin):
     
     fieldsets = (
         ('基本信息', {
-            'fields': ('title', 'description', 'location'),
+            'fields': ('title', 'description', 'location_name'),
             'classes': ('wide',),
         }),
         ('时间设置', {
@@ -56,8 +56,8 @@ admin.site.register(Speaker)
 
 admin.site.register(MeetingSummary)
 
-@admin.register(TranscriptSegment)
-class TranscriptSegmentAdmin(admin.ModelAdmin):
+@admin.register(Segment)
+class SegmentAdmin(admin.ModelAdmin):
     list_display = ['recording', 'speaker', 'formatted_start_time', 'formatted_end_time', 'text']
     ordering = ['recording', 'start_time']
 

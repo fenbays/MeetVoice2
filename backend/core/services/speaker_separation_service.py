@@ -1,5 +1,4 @@
 import os
-import torch
 import ffmpeg
 import time
 from datetime import datetime, timedelta
@@ -14,6 +13,7 @@ class SpeakerSeparationService:
     """说话人分离服务"""
     
     def __init__(self, model_manager: ModelManager):
+        import torch
         self.model_manager = model_manager
         self.model = None
         self.device = "cuda" if torch.cuda.is_available() else "cpu"

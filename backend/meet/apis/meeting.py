@@ -1,25 +1,27 @@
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from datetime import datetime
 import traceback
 
 from django.shortcuts import get_object_or_404
 from django.db import transaction
+from django.db.models import QuerySet
 from django.contrib.auth import get_user_model
 from ninja import Field, ModelSchema, Query, Router, Schema
 from ninja.pagination import paginate
-from meet.apis.recording import RecordingSchemaOut
+from pydantic import computed_field
+from meet.apis.recording import RecordingSchemaOut, SpeakerSchemaOut, SegmentSchemaOut
 from utils.usual import get_user_info_from_token
 from utils.anti_duplicate import anti_duplicate
 from system.models import File
-from meet.models import Meeting, Recording, Speaker, TranscriptSegment, MeetingShare, MeetingSummary, MeetingParticipant, MeetingPhoto
+from meet.models import Meeting, Recording, Speaker, Segment, MeetingShare, MeetingSummary, MeetingParticipant, MeetingPhoto
 from utils.meet_crud import create, delete, retrieve, update
 from utils.meet_ninja import MeetFilters, MyPagination
 from utils.meet_response import MeetResponse, MeetError, BusinessCode
 from meet.permissions import (
-    require_meeting_edit_permission, 
+    require_meeting_edit_permission,
+    require_meeting_permission, 
     require_meeting_view_permission,
     require_meeting_owner,
-    get_user_meetings_queryset
 )
 from utils.meet_response import MeetResponse
 import logging
@@ -29,6 +31,45 @@ User = get_user_model()
 
 router = Router()
 logger = logging.getLogger(__name__)
+
+def get_user_meetings_queryset(user_obj)->QuerySet[Meeting]:
+    """
+    获取用户可访问的会议QuerySet
+    
+    包含用户拥有的会议和被分享给用户的会议，按创建时间倒序排列。
+    
+    Args:
+        user_obj: 用户对象实例
+        
+    Returns:
+        QuerySet[Meeting]: 用户可访问的会议查询集，按创建时间倒序
+        
+    Raises:
+        ValueError: 当用户对象为None时
+        
+    Example:
+        >>> user = User.objects.get(id=1)
+        >>> meetings = get_user_meetings_queryset(user)
+        >>> print(meetings.count())
+    """
+    if not user_obj:
+        raise ValueError("用户对象不能为None")
+    
+    # 获取用户拥有的会议ID
+    owned_meeting_ids = Meeting.objects.filter(owner=user_obj).values_list('id', flat=True)
+    
+    # 获取分享给用户的会议ID
+    shared_meeting_ids = MeetingShare.objects.filter(
+        shared_user=user_obj, 
+        is_active=True
+    ).values_list('meeting_id', flat=True)
+    
+    # 合并所有会议ID
+    all_meeting_ids = list(owned_meeting_ids) + list(shared_meeting_ids)
+    
+    # 返回合并后的QuerySet，按创建时间倒序
+    return Meeting.objects.filter(id__in=all_meeting_ids).order_by('-create_datetime')
+
 
 # ============= Meeting 相关接口 =============
 
@@ -43,7 +84,7 @@ class MeetingSchemaIn(ModelSchema):
     id: Optional[int] = Field(None, alias="meetingid")
     class Config:
         model = Meeting
-        model_fields = ['title','description','location','start_time','end_time','keywords','status']
+        model_fields = ['title','description','location_name','latitude','longitude','start_time','end_time','keywords','status']
 
 
 class MeetingSchemaOut(ModelSchema):
@@ -51,6 +92,15 @@ class MeetingSchemaOut(ModelSchema):
     class Config:
         model = Meeting
         model_exclude = ["id"]
+
+    @computed_field(description="会议状态")
+    def status_text(self) -> str | None:
+        if self.status is not None:
+            # 从 PROCESS_STATUS_CHOICES 中获取对应的显示文本
+            for status_value, status_display in Meeting.STATUS_CHOICES:
+                if status_value == self.status:
+                    return status_display
+        return None
 
 class UserSchemaOut(ModelSchema):
     userid: int = Field(..., alias="id")
@@ -89,30 +139,83 @@ def get_meeting(request, meetingid: int=Query(...)):
     #     raise MeetError("会议不存在", BusinessCode.INSTANCE_NOT_FOUND.value)
     # return meeting
 
-@require_meeting_owner
 @router.post("/meeting/update", response=MeetingSchemaOut)
+@require_meeting_permission('owner')
 def update_meeting(request, data: MeetingSchemaIn):
     """更新会议信息（需要编辑权限）"""
     meeting = update(request, data.id, data, Meeting)
     return meeting
 
-@router.get("/meeting/list", response=List[MeetingSchemaOut])
+@router.post("/meeting/list", response=List[MeetingSchemaOut])
 @paginate(MyPagination)
-def list_meeting(request, filters: MeetingFilters = Query(...)):
+def list_meeting(request, filters: MeetingFilters):
     """获取用户可访问的会议列表"""
     request_user = get_user_info_from_token(request)
     user_obj = get_object_or_404(User, id=request_user['id'])
-    # 不使用通用retrieve，直接用权限过滤
+    
+    # 使用已有的函数获取用户可访问的会议
     qs = get_user_meetings_queryset(user_obj)
-    # 这里可以添加其他过滤条件
+    
+    # 应用过滤器
+    if filters is not None:
+        # 将filters中的空字符串值转换为None
+        for attr, value in filters.__dict__.items():
+            if getattr(filters, attr) == '':
+                setattr(filters, attr, None)
+        
+        # 构建过滤条件字典
+        filter_dict = filters.dict(exclude_none=True)
+        
+        # 特殊处理 title 字段为模糊搜索
+        if 'title' in filter_dict:
+            title_value = filter_dict.pop('title')
+            qs = qs.filter(title__icontains=title_value)
+        
+        # 应用其他过滤条件
+        if filter_dict:
+            qs = qs.filter(**filter_dict)
+    
     return qs
 
-@require_meeting_edit_permission
 @router.get("/meeting/delete")
+@require_meeting_permission('owner')
 def delete_meeting(request, meetingid: int=Query(...)):
     """删除会议（需要编辑权限）"""
     delete(meetingid, Meeting)
     return MeetResponse(errcode=BusinessCode.OK)
+
+class EnumItemSchema(Schema):
+    value: str | int
+    label: str
+
+
+# 枚举注册表（统一管理）
+ENUM_REGISTRY: Dict[str, list[tuple[Any, Any]]] = {
+    "meeting-statuses": Meeting.STATUS_CHOICES,
+    "photo-types": MeetingPhoto.PHOTO_TYPE_CHOICES,
+}
+
+@router.get("/enums/{enum_name}", response=List[EnumItemSchema])
+def get_enum_items(request, enum_name: str):
+    """
+    获取指定枚举
+    """
+    if enum_name not in ENUM_REGISTRY:
+        return []  # 或抛出 404 错误
+
+    choices = ENUM_REGISTRY[enum_name]
+    return [EnumItemSchema(value=c[0], label=c[1]) for c in choices]
+
+
+@router.get("/enums")
+def get_all_enums(request):
+    """
+    获取所有枚举
+    """
+    data = {}
+    for key, choices in ENUM_REGISTRY.items():
+        data[key] = [{"value": c[0], "label": c[1]} for c in choices]
+    return {"data": data}
 
 # ========== 会议分享 ==========
 
@@ -329,135 +432,7 @@ def get_user_meetingid(request, userid: int=Query(...)):
     return result
 
 
-# ============= Speaker 相关接口 =============
-
-class SpeakerFilters(MeetFilters):
-    recording_id: int = Field(None, alias="recording_id")
-    speaker_id: str = Field(None, alias="speaker_id")
-
-
-class SpeakerSchemaIn(ModelSchema):
-    speakerid: int = Field(..., description="关联录音ID", alias="id")
-    
-    class Config:
-        model = Speaker
-        model_exclude = ['id', 'recording', 'create_datetime', 'update_datetime']
-
-
-class SpeakerSchemaOut(ModelSchema):
-    class Config:
-        model = Speaker
-        model_fields = "__all__"
-
-@router.put("/speaker/update", response=SpeakerSchemaOut)
-def update_speaker(request, data: SpeakerSchemaIn):
-    """更新说话人信息"""
-    speaker_data = data.dict()
-    if 'recording_id' in speaker_data:
-        speaker_data['recording_id'] = speaker_data.pop('recording_id')
-    
-    speaker = update(request, data.id, speaker_data, Speaker)
-    return speaker
-
-
-@router.get("/speaker/list", response=List[SpeakerSchemaOut])
-@paginate(MyPagination)
-def list_speaker(request, filters: SpeakerFilters = Query(...)):
-    """分页获取说话人列表"""
-    qs = retrieve(request, Speaker, filters)
-    return qs
-
-
-@router.get("/speaker/get", response=SpeakerSchemaOut)
-def get_speaker(request, speakerid: int = Query(...)):
-    """获取说话人详情"""
-    speaker = get_object_or_404(Speaker, id=speakerid)
-    return speaker
-
-
-@router.get("/recording/{recording_id}/speakers/list", response=List[SpeakerSchemaOut])
-def list_recording_speakers(request, recording_id: int):
-    """获取指定录音的所有说话人"""
-    speakers = Speaker.objects.filter(recording_id=recording_id)
-    return list(speakers)
-
-
-# ============= TranscriptSegment 相关接口 =============
-
-class TranscriptFilters(MeetFilters):
-    recording_id: int = Field(None, alias="recording_id")
-    speaker_id: int = Field(None, alias="speaker_id")
-
-
-class TranscriptSchemaIn(ModelSchema):
-    recording_id: int = Field(..., description="关联录音ID")
-    speaker_id: int = Field(..., description="说话人ID")
-    
-    class Config:
-        model = TranscriptSegment
-        model_exclude = ['id', 'recording', 'speaker', 'create_datetime', 'update_datetime']
-
-
-class TranscriptSchemaOut(ModelSchema):
-    class Config:
-        model = TranscriptSegment
-        model_fields = "__all__"
-
-
-@router.post("/transcript", response=TranscriptSchemaOut)
-def create_transcript(request, data: TranscriptSchemaIn):
-    """创建转录片段"""
-    transcript_data = data.dict()
-    transcript_data['recording_id'] = transcript_data.pop('recording_id')
-    transcript_data['speaker_id'] = transcript_data.pop('speaker_id')
-    
-    transcript = create(request, transcript_data, TranscriptSegment)
-    return transcript
-
-
-@router.delete("/transcript/{transcript_id}")
-def delete_transcript(request, transcript_id: int):
-    """删除转录片段"""
-    delete(transcript_id, TranscriptSegment)
-    return {"success": True}
-
-
-@router.put("/transcript/{transcript_id}", response=TranscriptSchemaOut)
-def update_transcript(request, transcript_id: int, data: TranscriptSchemaIn):
-    """更新转录片段"""
-    transcript_data = data.dict()
-    if 'recording_id' in transcript_data:
-        transcript_data['recording_id'] = transcript_data.pop('recording_id')
-    if 'speaker_id' in transcript_data:
-        transcript_data['speaker_id'] = transcript_data.pop('speaker_id')
-    
-    transcript = update(request, transcript_id, transcript_data, TranscriptSegment)
-    return transcript
-
-
-@router.get("/transcript", response=List[TranscriptSchemaOut])
-@paginate(MyPagination)
-def list_transcript(request, filters: TranscriptFilters = Query(...)):
-    """分页获取转录片段列表"""
-    qs = retrieve(request, TranscriptSegment, filters)
-    return qs
-
-
-@router.get("/transcript/{transcript_id}", response=TranscriptSchemaOut)
-def get_transcript(request, transcript_id: int):
-    """获取转录片段详情"""
-    transcript = get_object_or_404(TranscriptSegment, id=transcript_id)
-    return transcript
-
-
-@router.get("/recording/{recording_id}/transcripts", response=List[TranscriptSchemaOut])
-def list_recording_transcripts(request, recording_id: int):
-    """获取指定录音的所有转录片段"""
-    transcripts = TranscriptSegment.objects.filter(recording_id=recording_id).order_by('start_time')
-    return list(transcripts)
-
-
-# ============= MeetingSummary 相关接口 =============
+# ============= MeetingSummary 会议纲要相关接口 =============
 
 class SummaryFilters(MeetFilters):
     meeting_id: int = Field(None, alias="meeting_id")
@@ -478,18 +453,10 @@ class SummarySchemaOut(ModelSchema):
         model_fields = "__all__"
 
 @router.get("/summary", response=List[SummarySchemaOut])
-@paginate(MyPagination)
 def list_summary(request, filters: SummaryFilters = Query(...)):
-    """分页获取会议纲要列表"""
+    """获取会议纲要列表"""
     qs = retrieve(request, MeetingSummary, filters)
     return qs
-
-
-@router.get("/summary/{summary_id}", response=SummarySchemaOut)
-def get_summary(request, summary_id: int):
-    """获取会议纲要详情"""
-    summary = get_object_or_404(MeetingSummary, id=summary_id)
-    return summary
 
 
 @router.get("/meeting/{meeting_id}/summary", response=SummarySchemaOut)
@@ -499,7 +466,7 @@ def get_meeting_summary(request, meeting_id: int):
     return summary
 
 
-# ============= MeetingParticipant 相关接口 =============
+# ============= MeetingParticipant 会议参与人相关接口 =============
 
 class ParticipantFilters(MeetFilters):
     meeting_id: int = Field(None, alias="meeting_id")
@@ -600,7 +567,7 @@ def get_meeting_moderator(request, meeting_id: int):
     return moderator
 
 
-# ============= MeetingPhoto 相关接口 =============
+# ============= MeetingPhoto 会议图片相关接口 =============
 
 class PhotoFilters(MeetFilters):
     meeting_id: int = Field(None, alias="meeting_id")
@@ -864,17 +831,6 @@ def get_meeting_photos_count(request, meeting_id: int):
         raise MeetError("获取照片统计失败", BusinessCode.SERVER_ERROR)
 
 
-# ============= 照片类型枚举接口 =============
-
-@router.get("/photo-types")
-def get_photo_types(request):
-    """获取照片类型枚举列表"""
-    return [
-        {"value": choice[0], "label": choice[1]} 
-        for choice in MeetingPhoto.PHOTO_TYPE_CHOICES
-    ]
-
-
 # ============= 聚合接口 =============
 
 class MeetingDetailSchema(Schema):
@@ -922,7 +878,7 @@ def get_meeting_detail(request, meeting_id: int):
 class RecordingDetailSchema(Schema):
     recording: RecordingSchemaOut
     speakers: List[SpeakerSchemaOut]
-    transcripts: List[TranscriptSchemaOut]
+    transcripts: List[SegmentSchemaOut]
 
 
 @router.get("/recording/{recording_id}/detail")
@@ -930,7 +886,7 @@ def get_recording_detail(request, recording_id: int):
     """获取录音完整详情（包含说话人和转录）"""
     recording = get_object_or_404(Recording, id=recording_id)
     speakers = list(Speaker.objects.filter(recording_id=recording_id))
-    transcripts = list(TranscriptSegment.objects.filter(recording_id=recording_id).order_by('start_time'))
+    transcripts = list(Segment.objects.filter(recording_id=recording_id).order_by('start_time'))
     
     return MeetResponse(data={
         "recording": recording,

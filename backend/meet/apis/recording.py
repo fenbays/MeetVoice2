@@ -10,18 +10,22 @@ from django.shortcuts import get_object_or_404
 from django.db import transaction
 from django.contrib.auth import get_user_model
 from urllib.parse import quote
+from ninja.pagination import paginate
 from ninja import Field, ModelSchema, Query, Router
+from utils.meet_auth import data_permission
+from utils.meet_crud import create, delete, retrieve, update
+from utils.meet_ninja import MeetFilters, MyPagination
 from pydantic import computed_field
 from utils.usual import get_user_info_from_token
 from system.models import File
-from meet.models import Meeting, Recording, Speaker, TranscriptSegment
+from meet.models import Meeting, Recording, Speaker, Segment
 from utils.meet_crud import delete, retrieve
 from utils.meet_ninja import MeetFilters, MyPagination
 from utils.meet_response import MeetResponse, MeetError, BusinessCode
 from meet.permissions import (
+    require_meeting_permission,
     require_meeting_view_permission,
     require_meeting_owner,
-    get_user_meetings_queryset,
     require_recording_owner,
     require_recording_view_permission
 )
@@ -192,6 +196,11 @@ def create_recording(request, meetingid: int=Query(...)):
                 duration=None,
                 process_status=0
             )
+            # INSERT_YOUR_CODE
+            # 创建录音后，将会议状态设为进行中（1）
+            if meeting.status != 1:
+                meeting.status = 1
+                meeting.save(update_fields=['status'])
 
             # 3. 启动后台处理任务
             from meet.tasks import process_uploaded_audio
@@ -309,13 +318,14 @@ def get_processing_status(request, recordingid: int=Query(...)):
         
         # 构建基础响应数据
         response_data = {
-            'recording_id': recordingid,
-            'meeting_id': recording.meeting.id,
+            'recordingid': recordingid,
+            'meetingid': recording.meeting.id,
             'meeting_title': recording.meeting.title,
             'process_status': recording.process_status,
             'status_text': recording.get_process_status_display(),
             'file_name': recording.file.name if recording.file else None,
             'file_size': recording.file.size if recording.file else None,
+            'file_uuid': str(recording.file.uuid) if recording.file else None,  # 改为返回UUID
             'duration': recording.duration,
             'upload_time': recording.create_datetime,
             'uploader_name': recording.uploader.name if recording.uploader else None,
@@ -336,7 +346,7 @@ def get_processing_status(request, recordingid: int=Query(...)):
                 speakers_list.append({
                     'speakerid': speaker.id,
                     'speaker_sequence': speaker.speaker_sequence,
-                    'speaker_name': speaker.name or speaker.speaker_id,
+                    'speaker_name': speaker.name or speaker.speaker_sequence,
                     'title': speaker.title,
                     'department': speaker.department,
                     'company': speaker.company,
@@ -356,8 +366,8 @@ def get_processing_status(request, recordingid: int=Query(...)):
                 segments_list.append({
                     'segmentid': segment.id,
                     'speakerid': segment.speaker.id,
-                    'speaker_sequence': segment.speaker.speaker_id,
-                    'speaker_name': segment.speaker.name or segment.speaker.speaker_id,
+                    'speaker_sequence': segment.speaker.speaker_sequence,
+                    'speaker_name': segment.speaker.name or segment.speaker.speaker_sequence,
                     'start_time': segment.start_time.strftime('%H:%M:%S.%f')[:-3],
                     'end_time': segment.end_time.strftime('%H:%M:%S.%f')[:-3],
                     'duration_seconds': _calculate_segment_duration(segment),
@@ -619,6 +629,126 @@ def batch_download_recordings_zip(request, meetingid: int=Query(...), file_type:
         logger.error(f'错误详情: {traceback.format_exc()}')
         raise MeetError('服务器错误，批量下载ZIP文件失败', BusinessCode.SERVER_ERROR.value)
 
+# ============= Speaker 说话人相关接口 =============
+
+class SpeakerFilters(MeetFilters):
+    meetingid: int = Field(None, description="会议ID")
+    recordingid: int = Field(None, description="录音ID")
+    speakerid: int = Field(None, description="说话人ID")
+
+
+class SpeakerSchemaIn(ModelSchema):
+    id: int = Field(..., description="说话人ID", alias="speakerid")
+    
+    class Config:
+        model = Speaker
+        model_exclude = ['id', 'recording', 'speaker_sequence', 'create_datetime', 'update_datetime']
+
+
+class SpeakerSchemaOut(ModelSchema):
+    speakerid: int = Field(..., alias="id")
+    class Config:
+        model = Speaker
+        model_exclude = ['id', 'create_datetime', 'update_datetime']
+
+    @computed_field(description="录音ID")
+    def recordingid(self) -> int | None:
+        return self.recording if self.recording else None
+    
+    @computed_field(description="会议ID")
+    def meetingid(self) -> int | None:
+        meetingid = Recording.objects.get(id=self.recording).meeting.id if self.recording else None
+        return meetingid
+
+@router.post("/speaker/update", response=SpeakerSchemaOut)
+@require_meeting_permission('edit')
+def update_speaker(request, data: SpeakerSchemaIn):
+    """更新说话人信息"""
+    speaker = update(request, data.id, data, Speaker)
+    return speaker
+
+
+@router.post("/speaker/list", response=List[SpeakerSchemaOut])
+@require_meeting_permission('view')
+@paginate(MyPagination)
+def list_speaker(request, filters: SpeakerFilters):
+
+    filters = data_permission(request, filters)   
+    filter_mapping = {
+        'meetingid': 'recording__meeting_id',
+        'recordingid': 'recording_id', 
+        'speakerid': 'id'
+    }    
+    filter_kwargs = {
+        filter_mapping[key]: getattr(filters, key)
+        for key in filter_mapping
+        if getattr(filters, key) is not None
+    }    
+    return Speaker.objects.filter(**filter_kwargs)
+
+
+@router.get("/speaker/get", response=SpeakerSchemaOut)
+@require_meeting_permission('view')
+def get_speaker(request, speakerid: int = Query(...)):
+    """获取说话人详情"""
+    speaker = get_object_or_404(Speaker, id=speakerid)
+    return speaker
+
+
+# ============= Segment 转录片段相关接口 =============
+
+class SegmentFilters(MeetFilters):
+    recordingid: int = Field(None, alias="recordingid")
+    speakerid: int = Field(None, alias="speakerid")
+    text: str = Field(None)
+
+
+class SegmentSchemaIn(ModelSchema):
+    id: int = Field(..., description="转录片段ID", alias="segmentid")
+    
+    class Config:
+        model = Segment
+        model_exclude = ['id', 'create_datetime', 'update_datetime']
+
+
+class SegmentSchemaOut(ModelSchema):
+    segmentid: int = Field(..., description="转录片段ID", alias="id")
+    class Config:
+        model = Segment
+        model_exclude = ['id', 'create_datetime', 'update_datetime']
+
+    @computed_field(description="说话人ID")
+    def speakerid(self) -> int | None:
+        return self.speaker if self.speaker else None
+    
+    @computed_field(description="录音ID")
+    def recordingid(self) -> int | None:
+        recordingid = Recording.objects.get(id=self.recording).id if self.recording else None
+        return recordingid
+
+@router.post("/segment/list", response=List[SegmentSchemaOut])
+@require_meeting_permission('view')
+@paginate(MyPagination)
+def list_segment(request, filters: SegmentFilters):
+    """分页获取转录片段列表"""
+    filters = data_permission(request, filters)       
+    queryset = Segment.objects.all()    
+    if filters.recordingid is not None:
+        queryset = queryset.filter(recording_id=filters.recordingid)    
+    if filters.speakerid is not None:
+        queryset = queryset.filter(speaker_id=filters.speakerid)  
+    if filters.text is not None:
+        queryset = queryset.filter(text__icontains=filters.text)
+    
+    return queryset
+
+
+@router.post("/segment/get", response=SegmentSchemaOut)
+@require_meeting_permission('view')
+def get_transcript(request, segmentid: int=Query(...)):
+    """获取转录片段详情"""
+    segment = get_object_or_404(Segment, id=segmentid)
+    return segment
 
 def _calculate_speaker_total_time(speaker: Speaker) -> int:
     """计算说话人总发言时间（秒）"""
@@ -633,7 +763,7 @@ def _calculate_speaker_total_time(speaker: Speaker) -> int:
         return total_seconds.total_seconds()
     return 0
 
-def _calculate_segment_duration(segment: TranscriptSegment) -> float:
+def _calculate_segment_duration(segment: Segment) -> float:
     """计算片段时长（秒）"""
     from datetime import datetime
     

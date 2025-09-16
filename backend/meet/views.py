@@ -10,7 +10,7 @@ from django.conf import settings
 from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
 from celery import current_app
-from .models import Meeting, Recording, Speaker, TranscriptSegment
+from .models import Meeting, Recording, Speaker, Segment
 from system.models import File
 import logging
 

@@ -1,5 +1,6 @@
 from django.db import models
 from django.contrib.auth import get_user_model
+from django.core.validators import MinValueValidator, MaxValueValidator
 from utils.models import CoreModel
 from system.models import File
 
@@ -9,7 +10,19 @@ class Meeting(CoreModel):
     """会议信息表"""
     title = models.CharField(max_length=200, verbose_name="会议标题", help_text="会议标题")
     description = models.TextField(blank=True, null=True, verbose_name="会议描述", help_text="会议描述")
-    location = models.CharField(max_length=200, blank=True, null=True, verbose_name="会议地点", help_text="会议地点")
+    location_name = models.CharField(max_length=200, blank=True, null=True, verbose_name="会议地点名称")
+    latitude = models.DecimalField(
+    max_digits=9, decimal_places=6,  # ±90.000000
+    blank=True, null=True,
+    verbose_name="纬度",
+    validators=[MinValueValidator(-90.0), MaxValueValidator(90.0)]
+    )
+    longitude = models.DecimalField(
+        max_digits=9, decimal_places=6,  # ±180.000000
+        blank=True, null=True,
+        verbose_name="经度",
+        validators=[MinValueValidator(-180.0), MaxValueValidator(180.0)]
+    )
     start_time = models.DateTimeField(verbose_name="开始时间", help_text="开始时间")
     end_time = models.DateTimeField(blank=True, null=True, verbose_name="结束时间", help_text="结束时间")
     
@@ -18,10 +31,10 @@ class Meeting(CoreModel):
                                help_text="会议关键词/专有名词，逗号分隔，将应用到所有关联录音处理")
     
     STATUS_CHOICES = [
-        (0, '未开始'),
-        (1, '进行中'),
-        (2, '已结束'),
-        (3, '已取消'),
+        (0, '未开始'), # 创建会议的默认状态
+        (1, '进行中'), # 录音中、暂停录音、上传录音文件后正在处理录音文件
+        (2, '已结束'), # 用户手动标记，标记后不能再上传录音
+        (3, '已取消'), # 用户取消会议，不能再修改会议信息或上传录音
     ]
     status = models.IntegerField(choices=STATUS_CHOICES, default=0, verbose_name="会议状态", help_text="会议状态")
     
@@ -171,7 +184,6 @@ class Speaker(CoreModel):
     speaker_sequence = models.CharField(max_length=50, verbose_name="说话人标识", 
                                  help_text="AI识别的说话人标识（如：说话人1、说话人2）")
     
-    # 用户后续可填写的信息
     name = models.CharField(max_length=100, blank=True, null=True, verbose_name="姓名", help_text="说话人姓名")
     title = models.CharField(max_length=100, blank=True, null=True, verbose_name="职务", help_text="说话人职务")
     department = models.CharField(max_length=100, blank=True, null=True, verbose_name="部门", help_text="说话人部门")
@@ -188,7 +200,7 @@ class Speaker(CoreModel):
         return self.speaker_sequence or "未命名说话人"
 
 
-class TranscriptSegment(CoreModel):
+class Segment(CoreModel):
     """转录文本片段表"""
     recording = models.ForeignKey(Recording, on_delete=models.CASCADE, related_name='transcripts',
                                  verbose_name="关联录音", help_text="关联录音")

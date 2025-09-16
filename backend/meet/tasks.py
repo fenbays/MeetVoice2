@@ -3,7 +3,7 @@ from celery import shared_task
 from django.conf import settings
 import os
 import logging
-from .models import Recording, Speaker, TranscriptSegment
+from .models import Recording, Speaker, Segment
 from core.services.audio_processor import AudioProcessor
 from .models import MeetingSummary
 import requests
@@ -280,7 +280,7 @@ def _save_processing_results(recording, result):
         if speaker and 'segments' in speaker_data:
             for segment_data in speaker_data['segments']:
                 # 直接使用时间字符串，格式已经符合 HH:MM:SS.mmm
-                TranscriptSegment.objects.create(
+                Segment.objects.create(
                     recording=recording,
                     speaker=speaker,
                     start_time=segment_data.get('start', '00:00:00.000'),

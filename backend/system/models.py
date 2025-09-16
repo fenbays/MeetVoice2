@@ -1,5 +1,6 @@
 import os
 import hashlib
+import uuid
 
 from django.db import models
 from django.contrib.auth.models import AbstractUser
@@ -211,6 +212,7 @@ def media_file_name(instance, filename):
     return os.path.join('files', h[0:1], h[1:2], h + ext.lower())
 
 class File(CoreModel):
+    uuid = models.UUIDField(default=uuid.uuid4, null=True, blank=True, unique=True, editable=False, verbose_name="文件UUID", help_text="文件唯一标识符")
     name = models.CharField(max_length=255, null=True, blank=True, verbose_name="实际名称", help_text="实际名称")
     save_name = models.CharField(max_length=255, null=True, blank=True, verbose_name="存储名称", help_text="存储名称")
     url = models.FileField(upload_to='files/', verbose_name="url", help_text="url")
@@ -233,19 +235,19 @@ class File(CoreModel):
         # if existing:
         #     return existing
         
-        # 3. 生成安全的随机文件名
-        ext = os.path.splitext(file_obj.name)[1].lower()
-        import uuid
-        secure_filename = f"{uuid.uuid4().hex}{ext}"
-        
-        # 4. 创建并保存
+        # 3. 生成文件实例（这会自动生成UUID）
         file_instance = cls(
             name=name or file_obj.name,
-            save_name=secure_filename,
             size=file_obj.size,
             md5sum=md5sum
         )
         
+        # 4. 使用UUID作为文件名
+        ext = os.path.splitext(file_obj.name)[1].lower()
+        secure_filename = f"{file_instance.uuid.hex}{ext}"
+        file_instance.save_name = secure_filename
+        
+        # 5. 保存文件
         file_instance.url.save(secure_filename, file_obj, save=False)
         file_instance.save()
         

@@ -2,7 +2,6 @@ import os
 import numpy as np
 from typing import Optional, Generator, Callable, Union
 import soundfile
-import torch
 import torchaudio
 from core.utils.model_manager import ModelManager
 
@@ -62,6 +61,7 @@ class StreamingSpeechService:
             print(f"🔄 使用FunASR重采样功能: {original_sr}Hz -> {target_sr}Hz")
             
             # 转换为torch tensor
+            import torch
             speech_tensor = torch.from_numpy(speech)
             
             # 使用torchaudio的重采样器
