@@ -11,7 +11,7 @@ from django.db import transaction
 from django.contrib.auth import get_user_model
 from urllib.parse import quote
 from ninja.pagination import paginate
-from ninja import Field, ModelSchema, Query, Router
+from ninja import Field, ModelSchema, Query, Router, Schema
 from utils.meet_auth import data_permission
 from utils.meet_crud import create, delete, retrieve, update
 from utils.meet_ninja import MeetFilters, MyPagination
@@ -129,9 +129,10 @@ class RecordingUpdateSchemaIn(ModelSchema):
 
 
 class RecordingSchemaOut(ModelSchema):
+    recordingid: int = Field(..., description="录音ID", alias="id")
     class Config:
         model = Recording
-        model_fields = "__all__"
+        model_exclude = ['id']
 
     @computed_field(description="处理状态")
     def status_text(self) -> str | None:
@@ -249,12 +250,17 @@ def update_recording(request, data: RecordingUpdateSchemaIn):
         logger.error(f'录音信息更新失败: {e}')
         raise MeetError('服务器错误，更新失败', BusinessCode.SERVER_ERROR.value)
 
-@router.get("/recording/delete")
+
+class RecordingDeleteSchemaIn(Schema):
+    """删除录音Schema"""
+    recordingid: int = Field(..., description="录音ID")
+
+@router.post("/recording/delete")
 @require_recording_owner
-def delete_recording(request, recordingid: int=Query(...)):
+def delete_recording(request, data: RecordingDeleteSchemaIn):
     """删除录音文件"""
     # 获取录音对象
-    recording = get_object_or_404(Recording, id=recordingid)
+    recording = get_object_or_404(Recording, id=data.recordingid)
     meeting = recording.meeting
     if meeting.status == 2:
         raise MeetError('会议已结束，无法删除录音', BusinessCode.BUSINESS_ERROR.value)
@@ -265,7 +271,7 @@ def delete_recording(request, recordingid: int=Query(...)):
     if recording.file:
         recording.file.delete()  # 这会同时删除物理文件
 
-    delete(recordingid, Recording)
+    delete(data.recordingid, Recording)
     return MeetResponse(errcode=BusinessCode.OK)
 
 @router.get("/meeting/recording/list", response=List[RecordingSchemaOut])
@@ -665,23 +671,22 @@ def update_speaker(request, data: SpeakerSchemaIn):
     return speaker
 
 
-@router.post("/speaker/list", response=List[SpeakerSchemaOut])
+@router.get("/speaker/list", response=List[SpeakerSchemaOut])
 @require_meeting_permission('view')
 @paginate(MyPagination)
-def list_speaker(request, filters: SpeakerFilters):
+def list_speaker(request, filters: SpeakerFilters = Query(...)):
 
     filters = data_permission(request, filters)   
-    filter_mapping = {
-        'meetingid': 'recording__meeting_id',
-        'recordingid': 'recording_id', 
-        'speakerid': 'id'
-    }    
-    filter_kwargs = {
-        filter_mapping[key]: getattr(filters, key)
-        for key in filter_mapping
-        if getattr(filters, key) is not None
-    }    
-    return Speaker.objects.filter(**filter_kwargs)
+    queryset = Speaker.objects.all()
+
+    if filters.meetingid is not None:
+        queryset = queryset.filter(recording__meeting_id=filters.meetingid)
+    if filters.recordingid is not None:
+        queryset = queryset.filter(recording_id=filters.recordingid)
+    if filters.speakerid is not None:
+        queryset = queryset.filter(id=filters.speakerid)
+   
+    return queryset
 
 
 @router.get("/speaker/get", response=SpeakerSchemaOut)

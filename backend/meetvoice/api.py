@@ -7,14 +7,18 @@ from utils.meet_response import BusinessCode, MeetResponse
 
 api = MeetNinjaAPI(auth=GlobalAuth())
 
+@api.exception_handler(Http404)
+def handle_http404(request, exc):
+    import traceback
+    traceback.print_exc()
+    return MeetResponse(errcode=BusinessCode.INSTANCE_NOT_FOUND, errmsg="找不到请求的资源")
+
 # 统一处理server异常
 @api.exception_handler(Exception)
 def a(request, exc):
     import traceback
     traceback.print_exc()
-    if isinstance(exc, Http404):
-        return MeetResponse(errcode=BusinessCode.INSTANCE_NOT_FOUND, errmsg="找不到请求的资源")    
-    elif hasattr(exc, 'errno'):
+    if hasattr(exc, 'errno'):
         return MeetResponse(errcode=exc.errno, errmsg=str(exc))
     else:
         return MeetResponse(errcode=BusinessCode.SERVER_ERROR, errmsg=str(exc))

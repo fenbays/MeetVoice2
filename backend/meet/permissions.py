@@ -28,17 +28,18 @@ def _get_meeting_from_request(request, *args, **kwargs):
             if name in kwargs:
                 return name, kwargs[name]
             
-            # 2. 从请求体获取
-            try:
-                if hasattr(request, 'body') and request.body:
-                    body = json.loads(request.body)
-                    if name in body:
-                        return name, body[name]
-                    # 支持id字段（用于更新操作）
-                    if name.endswith('id') and 'id' in body:
-                        return name, body['id']
-            except (json.JSONDecodeError, AttributeError):
-                pass
+            # 2. 从请求体获取（仅POST/PUT/PATCH请求）
+            if request.method in ['POST']:
+                try:
+                    if hasattr(request, 'body') and request.body:
+                        body = json.loads(request.body)
+                        if name in body:
+                            return name, body[name]
+                        # 支持id字段（用于更新操作）
+                        if name.endswith('id') and 'id' in body:
+                            return name, body['id']
+                except (json.JSONDecodeError, AttributeError):
+                    pass
             
             # 3. 从查询参数获取
             if hasattr(request, 'GET') and name in request.GET:
@@ -53,12 +54,12 @@ def _get_meeting_from_request(request, *args, **kwargs):
                                            'segmentid', 'segment_id'])
     
     if not id_value:
-        raise MeetError("缺少必要的ID参数", BusinessCode.BUSINESS_ERROR)
+        raise MeetError("缺少必要的ID参数", BusinessCode.BUSINESS_ERROR.value)
     
     try:
         id_value = int(id_value)
     except (ValueError, TypeError):
-        raise MeetError(f"{id_type}必须为数字", BusinessCode.BUSINESS_ERROR)
+        raise MeetError(f"{id_type}必须为数字", BusinessCode.BUSINESS_ERROR.value)
 
     # 根据ID类型获取meeting
     try:
@@ -83,7 +84,7 @@ def _get_meeting_from_request(request, *args, **kwargs):
             return segment.recording.meeting
             
     except (Meeting.DoesNotExist, Recording.DoesNotExist, Speaker.DoesNotExist):
-        raise MeetError("请求的资源不存在", BusinessCode.INSTANCE_NOT_FOUND)
+        raise MeetError("请求的资源不存在", BusinessCode.INSTANCE_NOT_FOUND.value)
 
 
 def require_meeting_permission(permission_type='view'):
@@ -100,13 +101,13 @@ def require_meeting_permission(permission_type='view'):
             
             if permission_type == 'view':
                 if not meeting.user_can_view(user_obj):
-                    raise MeetError("无权限查看此资源", BusinessCode.PERMISSION_DENIED)
+                    raise MeetError("无权限查看此资源", BusinessCode.PERMISSION_DENIED.value)
             elif permission_type == 'edit':
                 if not meeting.user_can_edit(user_obj):
-                    raise MeetError("无权限编辑此资源", BusinessCode.PERMISSION_DENIED)
+                    raise MeetError("无权限编辑此资源", BusinessCode.PERMISSION_DENIED.value)
             elif permission_type == 'owner':
                 if meeting.owner != user_obj:
-                    raise MeetError("仅资源所有者可执行此操作", BusinessCode.PERMISSION_DENIED)
+                    raise MeetError("仅资源所有者可执行此操作", BusinessCode.PERMISSION_DENIED.value)
             
             return view_func(request, *args, **kwargs)
         return wrapper

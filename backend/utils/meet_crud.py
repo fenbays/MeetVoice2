@@ -107,16 +107,19 @@ def update(request, id, data, model):
     返回值:
     - 更新后的模型实例。
     """
-    dict_data = data.dict()  # 将data转换为字典格式
+    if not isinstance(data, dict):
+        # 如果data不是字典类型，则转换为字典
+        data = data.dict()
+    # dict_data = data.dict()  # 将data转换为字典格式
     user_info = get_user_info_from_token(request)  # 从请求中获取用户信息
     # 为更新的数据添加修改者信息
-    dict_data['modifier'] = user_info['name']
+    data['modifier'] = user_info['name']
     try:
         instance = model.objects.get(id=id)
     except model.DoesNotExist:
-        raise MeetError("对象不存在", BusinessCode.INSTANCE_NOT_FOUND)
+        raise MeetError("对象不存在", BusinessCode.INSTANCE_NOT_FOUND.value)
     # 遍历字典，将更新的数据设置到模型实例上
-    for attr, value in dict_data.items():
+    for attr, value in data.items():
         setattr(instance, attr, value)
     instance.save()  # 保存更新
     return instance  # 返回更新后的实例

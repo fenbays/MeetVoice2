@@ -3,12 +3,14 @@ from datetime import datetime
 import traceback
 
 from django.shortcuts import get_object_or_404
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import QuerySet
 from django.contrib.auth import get_user_model
 from ninja import Field, ModelSchema, Query, Router, Schema
 from ninja.pagination import paginate
 from pydantic import computed_field
+from utils.meet_auth import data_permission
+from meet.tasks import generate_meeting_report_task
 from meet.apis.recording import RecordingSchemaOut, SpeakerSchemaOut, SegmentSchemaOut
 from utils.usual import get_user_info_from_token
 from utils.anti_duplicate import anti_duplicate
@@ -108,6 +110,51 @@ class UserSchemaOut(ModelSchema):
         model = User
         model_fields = ['id','name', 'avatar', 'email', 'mobile']
 
+class MeetingParticipantSchemaOut(ModelSchema):
+    """参会人员Schema"""
+    participantid: int = Field(..., alias="id")
+    class Config:
+        model = MeetingParticipant
+        model_exclude = ["id"]
+
+class MeetingPhotoSchemaOut(ModelSchema):
+    """会议照片Schema"""
+    photoid: int = Field(..., alias="id")
+    
+    class Config:
+        model = MeetingPhoto
+        model_exclude = ["id"]
+    
+    @computed_field(description="文件URL")
+    def file_url(self) -> str:
+        if self.file and hasattr(self.file, 'url'):
+            return self.file.url
+        return ""
+    
+    @computed_field(description="照片类型文本")
+    def photo_type_text(self) -> str:
+        return self.get_photo_type_display()
+
+class MeetingDetailSchemaOut(ModelSchema):
+    """会议详情Schema - 包含所有相关信息"""
+    meetingid: int = Field(..., alias="id")
+    participants: List[MeetingParticipantSchemaOut] = Field(default=[], description="参会人员列表")
+    photos: List[MeetingPhotoSchemaOut] = Field(default=[], description="所有会议照片")
+    meeting_photos: List[MeetingPhotoSchemaOut] = Field(default=[], description="会议照片（非签到表）")
+    signin_photos: List[MeetingPhotoSchemaOut] = Field(default=[], description="签到表照片")
+    speakers: List[SpeakerSchemaOut] = Field(default=[], description="发言人列表")
+    
+    class Config:
+        model = Meeting
+        model_exclude = ["id"]
+    
+    @computed_field(description="会议状态")
+    def status_text(self) -> str | None:
+        if self.status is not None:
+            for status_value, status_display in Meeting.STATUS_CHOICES:
+                if status_value == self.status:
+                    return status_display
+        return None
 
 @router.post("/meeting/create", response=MeetingSchemaOut)
 @anti_duplicate(expire_time=10)
@@ -125,13 +172,45 @@ def create_meeting(request, data: MeetingSchemaIn):
         return MeetResponse(errcode=BusinessCode.SERVER_ERROR, errmsg='创建会议失败')
     return meeting
 
-@require_meeting_view_permission
-@router.get("/meeting/get", response=MeetingSchemaOut)
+@router.get("/meeting/get", response=MeetingDetailSchemaOut)
+@require_meeting_permission('view')
 def get_meeting(request, meetingid: int=Query(...)):
     """获取会议详情（需要查看权限）"""
 
-    meeting = get_object_or_404(Meeting, id=meetingid)
-    return meeting
+    meeting = get_object_or_404(
+    Meeting.objects.select_related('owner').prefetch_related(
+            'participants',
+            'photos__file', 
+            'recordings__speakers'
+        ), 
+        id=meetingid
+    )
+    # 获取参会人员
+    participants = list(meeting.participants.all())
+    
+    # 获取所有照片
+    all_photos = list(meeting.photos.all())
+    
+    # 分类照片：会议照片和签到表
+    meeting_photos = [photo for photo in all_photos if photo.photo_type == 1]
+    signin_photos = [photo for photo in all_photos if photo.photo_type == 2]
+    
+    # 获取所有发言人（从所有录音中）
+    all_speakers = []
+    for recording in meeting.recordings.all():
+        all_speakers.extend(recording.speakers.all())
+    
+    # 构建返回数据
+    meeting_dict = meeting.__dict__.copy()
+    meeting_dict.update({
+        'participants': participants,
+        'photos': all_photos,
+        'meeting_photos': meeting_photos,
+        'signin_photos': signin_photos,
+        'speakers': all_speakers,
+    })
+    
+    return meeting_dict
 
 @router.post("/meeting/update", response=MeetingSchemaOut)
 @require_meeting_permission('owner')
@@ -191,6 +270,7 @@ class EnumItemSchema(Schema):
 # 枚举注册表（统一管理）
 ENUM_REGISTRY: Dict[str, list[tuple[Any, Any]]] = {
     "meeting-statuses": Meeting.STATUS_CHOICES,
+    "meeting-report-statuses": MeetingSummary.GENERATE_STATUS_CHOICES,
     "photo-types": MeetingPhoto.PHOTO_TYPE_CHOICES,
 }
 
@@ -433,148 +513,295 @@ def get_user_meetingid(request, userid: int=Query(...)):
 
 # ============= MeetingSummary 会议纲要相关接口 =============
 
-class SummaryFilters(MeetFilters):
-    meeting_id: int = Field(None, alias="meeting_id")
-    generate_status: int = Field(None, alias="generate_status")
-
-
 class SummarySchemaIn(ModelSchema):
-    meeting_id: int = Field(..., description="关联会议ID")
+    meetingid: int = Field(..., description="关联会议ID")
     
     class Config:
         model = MeetingSummary
-        model_exclude = ['id', 'meeting', 'create_datetime', 'update_datetime']
+        model_exclude = ['id', 'meeting']
 
 
 class SummarySchemaOut(ModelSchema):
+    summaryid: int = Field(..., description="纲要ID", alias="id")
     class Config:
         model = MeetingSummary
-        model_fields = "__all__"
+        model_exclude = ['id', 'meeting']
 
-@router.get("/summary", response=List[SummarySchemaOut])
-def list_summary(request, filters: SummaryFilters = Query(...)):
-    """获取会议纲要列表"""
-    qs = retrieve(request, MeetingSummary, filters)
-    return qs
+@router.get("/meeting/summary/get", response=SummarySchemaOut)
+def get_meeting_summary(request, meetingid: int=Query(...)):
+    """获取指定会议的纲要、会议报告文件"""
+    summary = get_object_or_404(MeetingSummary, meeting_id=meetingid)
+    return summary
 
 
-@router.get("/meeting/{meeting_id}/summary", response=SummarySchemaOut)
-def get_meeting_summary(request, meeting_id: int):
-    """获取指定会议的纲要"""
-    summary = get_object_or_404(MeetingSummary, meeting_id=meeting_id)
+@router.get("/meeting/reportfile/generate", response=SummarySchemaOut)
+def generate_meeting_report(request, meetingid: int=Query(...)):
+    """生成会议报告文件
+    生成前提：会议名称、发言人、参会人员、会议照片、会议签到表均已设置
+    """
+    summary = get_object_or_404(MeetingSummary, meeting_id=meetingid)
+    meeting = summary.meeting
+    
+    # 1. 检查必要信息是否完整
+    if not meeting.title:
+        raise MeetError("会议名称未设置", BusinessCode.BUSINESS_ERROR.value)
+        
+    # 检查主持人
+    moderator = meeting.get_moderator()
+    if not moderator:
+        raise MeetError("未设置会议主持人", BusinessCode.BUSINESS_ERROR.value)
+        
+    # 检查参会人员
+    participants = meeting.participants.all()
+    if not participants.exists():
+        raise MeetError("未添加参会人员", BusinessCode.BUSINESS_ERROR.value)
+        
+    # 检查会议照片
+    photos = meeting.photos.filter(photo_type=1)
+    if not photos.exists():
+        raise MeetError("未上传会议照片", BusinessCode.BUSINESS_ERROR.value)
+        
+    # 检查签到表
+    sign_in_sheets = meeting.photos.filter(photo_type=2)
+    if not sign_in_sheets.exists():
+        raise MeetError("未上传签到表", BusinessCode.BUSINESS_ERROR.value)
+    
+    # 检查当前状态
+    if summary.generate_status == 1:
+        return summary
+        
+    # 更新状态为生成中
+    summary.generate_status = 1
+    summary.save()
+    
+    # 启动异步任务
+    generate_meeting_report_task.delay(meetingid)
+    
     return summary
 
 
 # ============= MeetingParticipant 会议参与人相关接口 =============
 
 class ParticipantFilters(MeetFilters):
-    meeting_id: int = Field(None, alias="meeting_id")
-    is_moderator: bool = Field(None, alias="is_moderator")
-    user_id: int = Field(None, alias="user_id")
+    meetingid: int = Field(None, alias="meetingid", description="关联会议ID")
+    is_moderator: bool = Field(None, alias="is_moderator", description="是否主持人")
 
 
 class ParticipantSchemaIn(ModelSchema):
-    meeting_id: int = Field(..., description="关联会议ID")
-    user_id: int = Field(None, description="关联用户ID（可选）")
+    """参会人员输入Schema"""
+    meetingid: int = Field(..., description="关联会议ID")
+    participantid: Optional[int] = Field(None, description="参会人员ID")
+    userid: Optional[int] = Field(None, description="关联用户ID（可选）")
+    name: str = Field(..., description="姓名")
+    company: str = Field(..., description="单位")
+    title: Optional[str] = Field(None, description="职务")
+    is_moderator: Optional[bool] = Field(False, description="是否主持人")
     
     class Config:
         model = MeetingParticipant
-        model_exclude = ['id', 'meeting', 'user', 'create_datetime', 'update_datetime']
+        model_exclude = ['user', 'meeting','create_datetime', 'update_datetime']
 
 
 class ParticipantSchemaOut(ModelSchema):
-    meeting_id: int = Field(..., description="关联会议ID")
-    user_id: int = Field(None, description="关联用户ID")
-    user_name: str = Field(None, description="关联用户姓名")
-    
+    """参会人员输出Schema"""
+    participantid: int = Field(..., description="参会人员ID", alias="id")
+        
     class Config:
         model = MeetingParticipant
-        model_fields = "__all__"
+        model_exclude = ["id", "create_datetime", "update_datetime"]
     
-    @staticmethod
-    def resolve_user_name(obj):
-        return obj.user.name if obj.user else None
+    @computed_field(description="关联会议ID")
+    def meetingid(self) -> int:
+        return self.meeting if self.meeting else None
+    
+    @computed_field(description="关联用户ID")
+    def userid(self) -> int | None:
+        return self.user if self.user else None   
+  
 
-
-@require_meeting_edit_permission
-@router.post("/meeting/{meeting_id}/participant", response=ParticipantSchemaOut)
-def add_participant(request, meeting_id: int, data: ParticipantSchemaIn):
+@require_meeting_permission('edit')
+@router.post("/meeting/participant/add", response=ParticipantSchemaOut)
+def add_participant(request, data: ParticipantSchemaIn):
     """添加参会人员（需要编辑权限）"""
+    meeting = get_object_or_404(Meeting, id=data.meetingid)
     participant_data = data.dict()
-    participant_data['meeting_id'] = meeting_id
     
     # 处理用户关联
-    if 'user_id' in participant_data and participant_data['user_id']:
-        user = get_object_or_404(User, id=participant_data['user_id'])
+    if participant_data.get('userid'):
+        user = get_object_or_404(User, id=participant_data['userid'])
         participant_data['user'] = user
         # 如果关联了用户但没填姓名，自动填充
         if not participant_data.get('name'):
-            participant_data['name'] = user.name
+            participant_data['name'] = user.name if user.name else user.username
+    else:
+        participant_data['user'] = None
     
-    participant_data.pop('user_id', None)
-    participant = create(request, participant_data, MeetingParticipant)
-    return participant
+    participant_data['meeting'] = meeting
+    participant_data.pop('userid', None)
+    participant_data.pop('meetingid', None) 
+    participant_data.pop('participantid', None)
+    
+    try:
+        participant = create(request, participant_data, MeetingParticipant)
+        return participant
+    except IntegrityError as e:
+        # 捕获重复添加的错误
+        if "Duplicate entry" in str(e) and "meet_participant_meeting_id_name_company" in str(e):
+            raise MeetError("该参会人员已存在，不能重复添加", BusinessCode.BUSINESS_ERROR.value)
+        else:
+            # 其他完整性错误
+            raise MeetError(f"数据完整性错误: {str(e)}", BusinessCode.BUSINESS_ERROR.value)
 
+class ParticipantDeleteSchemaIn(Schema):
+    """移除参与人Schema"""
+    meetingid: int = Field(..., description="关联会议ID")
+    participantid: int = Field(..., description="参会人员ID")
 
-@require_meeting_edit_permission
-@router.delete("/meeting/{meeting_id}/participant/{participant_id}")
-def remove_participant(request, meeting_id: int, participant_id: int):
+@require_meeting_permission('edit')
+@router.post("/meeting/participant/delete")
+def remove_participant(request, data: ParticipantDeleteSchemaIn):
     """移除参会人员（需要编辑权限）"""
     participant = get_object_or_404(MeetingParticipant, 
-                                   id=participant_id, 
-                                   meeting_id=meeting_id)
+                                   id=data.participantid, 
+                                   meeting_id=data.meetingid)
     participant.delete()
-    return {"success": True}
+    return MeetResponse(errcode=BusinessCode.OK)
 
 
-@require_meeting_edit_permission
-@router.put("/meeting/{meeting_id}/participant/{participant_id}", response=ParticipantSchemaOut)
-def update_participant(request, meeting_id: int, participant_id: int, data: ParticipantSchemaIn):
+@require_meeting_permission('edit')
+@router.post("/meeting/participant/update", response=ParticipantSchemaOut)
+def update_participant(request, data: ParticipantSchemaIn):
     """更新参会人员信息（需要编辑权限）"""
-    participant_data = data.dict()
+    meeting = get_object_or_404(Meeting, id=data.meetingid)
     
+    # 验证参会人员存在且属于指定会议
+    participant = get_object_or_404(MeetingParticipant, 
+                                   id=data.participantid, 
+                                   meeting=meeting)
+        
     # 处理用户关联
-    if 'user_id' in participant_data:
-        if participant_data['user_id']:
-            user = get_object_or_404(User, id=participant_data['user_id'])
-            participant_data['user'] = user
-        else:
-            participant_data['user'] = None
-        participant_data.pop('user_id')
+    user = None
+    if data.userid:
+        user = get_object_or_404(User, id=data.userid)
+        # 如果关联了用户但没填姓名，自动填充
+        if not data.name:
+            data.name = user.name if user.name else user.username
     
-    participant = update(request, participant_id, participant_data, MeetingParticipant)
+    # 获取用户信息用于更新修改者字段
+    user_info = get_user_info_from_token(request)
+    
+    try:
+        participant.name = data.name
+        participant.company = data.company
+        participant.title = data.title
+        participant.is_moderator = data.is_moderator if data.is_moderator is not None else False
+        participant.user = user
+        participant.modifier = user_info['name']  # 更新修改者信息
+        
+        participant.save()
+        return participant
+        
+    except IntegrityError as e:
+        if "Duplicate entry" in str(e) and "meet_participant_meeting_id_name_company" in str(e):
+            raise MeetError("该参会人员信息已存在，不能更新", BusinessCode.BUSINESS_ERROR.value)
+        else:
+            raise MeetError(f"数据完整性错误: {str(e)}", BusinessCode.BUSINESS_ERROR.value)
+        
+@require_meeting_permission('view')
+@router.get("/meeting/participant/list", response=List[ParticipantSchemaOut])
+def list_meeting_participants(request, filters: ParticipantFilters = Query(...)):
+    """获取会议参会人员列表（需要查看权限）"""
+    filters = data_permission(request, filters)    
+    queryset = MeetingParticipant.objects.filter(meeting_id=filters.meetingid).select_related('user', 'meeting')
+    
+    # 应用过滤器
+    if filters.is_moderator is not None:
+        queryset = queryset.filter(is_moderator=filters.is_moderator)
+    
+    queryset = queryset.order_by('-is_moderator', '-create_datetime')
+    return list(queryset)
+
+
+@require_meeting_permission('view')
+@router.get("/meeting/moderator/get", response=ParticipantSchemaOut)
+def get_meeting_moderator(request, meetingid: int=Query(...)):
+    """获取会议主持人（需要查看权限）"""
+    # 验证会议存在
+    meeting = get_object_or_404(Meeting, id=meetingid)
+    
+    # 获取主持人（只应该有一个）
+    try:
+        moderator = MeetingParticipant.objects.get(
+            meeting_id=meetingid, 
+            is_moderator=True
+        )
+        return moderator
+    except MeetingParticipant.DoesNotExist:
+        raise MeetError("该会议未设置主持人", BusinessCode.INSTANCE_NOT_FOUND.value)
+    except MeetingParticipant.MultipleObjectsReturned:
+        # 如果有多个主持人，说明数据不一致，需要修复
+        # 保留第一个，取消其他的主持人身份
+        moderators = MeetingParticipant.objects.filter(
+            meeting_id=meetingid, 
+            is_moderator=True
+        ).order_by('id')
+        
+        first_moderator = moderators.first()
+        # 取消其他主持人身份
+        moderators.exclude(id=first_moderator.id).update(is_moderator=False)
+        
+        return first_moderator
+
+
+@require_meeting_permission('edit')
+@router.post("/meeting/moderator/set", response=ParticipantSchemaOut)
+def set_participant_as_moderator(request, data: ParticipantSchemaIn):
+    """设置参会人员为主持人（需要编辑权限）"""
+    # 先取消其他主持人的主持人身份
+    MeetingParticipant.objects.filter(meeting_id=data.meetingid, is_moderator=True).update(is_moderator=False)
+    
+    # 设置新的主持人
+    participant = get_object_or_404(MeetingParticipant, 
+                                   id=data.participantid, 
+                                   meeting_id=data.meetingid)
+    participant.is_moderator = True
+    participant.save()
+    
     return participant
 
 
-@require_meeting_view_permission
-@router.get("/meeting/{meeting_id}/participants", response=List[ParticipantSchemaOut])
-def list_meeting_participants(request, meeting_id: int):
-    """获取会议参会人员列表（需要查看权限）"""
-    participants = MeetingParticipant.objects.filter(
-        meeting_id=meeting_id
-    ).select_related('user').order_by('-is_moderator', 'name')
-    return list(participants)
+@require_meeting_permission('edit')
+@router.post("/meeting/moderator/unset", response=ParticipantSchemaOut)
+def unset_participant_as_moderator(request, data: ParticipantSchemaIn):
+    """取消参会人员的主持人身份（需要编辑权限）"""
+    participant = get_object_or_404(MeetingParticipant, 
+                                   id=data.participantid, 
+                                   meeting_id=data.meetingid)
+    participant.is_moderator = False
+    participant.save()
+    
+    return participant
 
 
-@require_meeting_view_permission
-@router.get("/meeting/{meeting_id}/moderator", response=ParticipantSchemaOut)
-def get_meeting_moderator(request, meeting_id: int):
-    """获取会议主持人（需要查看权限）"""
-    moderator = get_object_or_404(MeetingParticipant, 
-                                 meeting_id=meeting_id, 
-                                 is_moderator=True)
-    return moderator
+@require_meeting_permission('view')
+@router.get("/meeting/participant/get", response=ParticipantSchemaOut)
+def get_participant(request, meetingid: int=Query(...), participantid: int=Query(...)):
+    """获取单个参会人员详情（需要查看权限）"""
+    participant = get_object_or_404(MeetingParticipant, 
+                                   id=participantid, 
+                                   meeting_id=meetingid)
+    return participant
 
 
 # ============= MeetingPhoto 会议图片相关接口 =============
 
 class PhotoFilters(MeetFilters):
-    meeting_id: int = Field(None, alias="meeting_id")
-    photo_type: int = Field(None, alias="photo_type")
+    meeting_id: int = Field(None, alias="meeting_id", description="关联会议ID")
+    photo_type: int = Field(None, alias="photo_type", description="照片类型")
 
 
 class PhotoSchemaIn(ModelSchema):
-    meeting_id: int = Field(..., description="关联会议ID")
+    meetingid: int = Field(..., description="关联会议ID", alias="meeting_id")
     file_id: int = Field(..., description="图片文件ID")
     
     class Config:

@@ -1,9 +1,11 @@
 import traceback
 from celery import shared_task
 from django.conf import settings
+from django.core.exceptions import ValidationError
+import markdown
 import os
 import logging
-from .models import Recording, Speaker, Segment
+from .models import Recording, Speaker, Segment, MeetingSummary, Meeting, MeetingPhoto
 from core.services.audio_processor import AudioProcessor
 from .models import MeetingSummary
 import requests
@@ -288,3 +290,71 @@ def _save_processing_results(recording, result):
                     text=segment_data.get('text', ''),
                     confidence=1.0  # 如果API没有提供confidence，默认为1.0
                 )
+
+
+@shared_task
+def generate_meeting_report_task(meetingid: int):
+    """异步任务：生成会议报告"""
+    try:
+        summary = MeetingSummary.objects.get(meeting_id=meetingid)
+        meeting = summary.meeting
+
+        # 主持人 
+        moderator = meeting.get_moderator()
+        # 检查参会人员
+        participants = meeting.participants.all()
+        # 检查会议照片
+        photos = meeting.photos.filter(photo_type=1)
+        # 检查签到表
+        sign_in_sheets = meeting.photos.filter(photo_type=2)
+        # markdown内容
+        md_content = f"""# {meeting.title}会议报告
+
+## 会议基本信息
+- 会议时间：{meeting.start_time.strftime('%Y年%m月%d日 %H:%M')}
+- 会议地点：{meeting.location_name or '未设置'}
+- 主持人：{moderator.name} {moderator.title or ''} {moderator.company or ''}
+
+## 参会人员
+"""
+        # 添加参会人员信息
+        for p in participants:
+            if not p.is_moderator:
+                md_content += f"- {p.name} {p.title or ''} {p.company or ''}\n"
+        
+        md_content += "\n## 会议纲要\n"
+        md_content += summary.content
+        
+        md_content += "\n## 会议照片\n"
+        for photo in photos:
+            md_content += f"![会议照片]({photo.file.url})\n"
+            if photo.description:
+                md_content += f"*{photo.description}*\n\n"
+        
+        md_content += "\n## 签到表\n"
+        for sheet in sign_in_sheets:
+            md_content += f"![签到表]({sheet.file.url})\n"
+        
+        # 3. 保存为文件
+        from django.core.files.base import ContentFile
+        from system.models import File
+        
+        # 生成HTML（可选）
+        html_content = markdown.markdown(md_content)
+        
+        # 保存markdown文件
+        md_filename = f"{meeting.title}-会议报告.md"
+        md_file = File.objects.create(
+            name=md_filename,
+            file=ContentFile(md_content.encode(), name=md_filename)
+        )
+        
+        # 更新状态
+        summary.report_file = md_file
+        summary.generate_status = 2  # 已生成
+        summary.save()
+        
+    except Exception as e:
+        summary.generate_status = 3  # 生成失败
+        summary.save()
+        raise e

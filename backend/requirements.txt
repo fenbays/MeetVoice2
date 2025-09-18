@@ -19,3 +19,4 @@ ffmpeg-python
 pydub
 psutil
 django-stubs==5.2.5
+markdown==3.9

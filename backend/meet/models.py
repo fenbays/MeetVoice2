@@ -263,7 +263,9 @@ class MeetingSummary(CoreModel):
         (3, '生成失败'),
     ]
     generate_status = models.IntegerField(choices=GENERATE_STATUS_CHOICES, default=0,
-                                        verbose_name="生成状态", help_text="生成状态")
+                                        verbose_name="会议报告生成状态", help_text="会议报告生成状态")
+    report_file = models.ForeignKey(File, on_delete=models.SET_NULL, null=True, blank=True,
+                                   verbose_name="会议报告文件", help_text="会议报告文件")
     
     class Meta:
         db_table = "meet_summary"
@@ -307,7 +309,10 @@ class MeetingParticipant(CoreModel):
         verbose_name = "参会人员"
         verbose_name_plural = verbose_name
         # 同一会议中，同一用户只能有一条记录
-        unique_together = ['meeting', 'user']
+        unique_together = [
+            ['meeting', 'user'],  # 同一会议中，同一用户只能有一条记录
+            ['meeting', 'name', 'company']  # 同一会议中，姓名和单位不能完全相同
+        ]
         ordering = ['-is_moderator', 'name']  # 主持人排在前面
         
     def __str__(self):
