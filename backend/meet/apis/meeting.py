@@ -1,3 +1,4 @@
+from functools import cached_property
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 import traceback
@@ -8,7 +9,7 @@ from django.db.models import QuerySet
 from django.contrib.auth import get_user_model
 from ninja import Field, ModelSchema, Query, Router, Schema
 from ninja.pagination import paginate
-from pydantic import computed_field
+from pydantic import ValidationError, computed_field, field_validator, model_validator
 from utils.meet_auth import data_permission
 from meet.tasks import generate_meeting_report_task
 from meet.apis.recording import RecordingSchemaOut, SpeakerSchemaOut, SegmentSchemaOut
@@ -584,7 +585,9 @@ def generate_meeting_report(request, meetingid: int=Query(...)):
 
 class ParticipantFilters(MeetFilters):
     meetingid: int = Field(None, alias="meetingid", description="关联会议ID")
-    is_moderator: bool = Field(None, alias="is_moderator", description="是否主持人")
+    is_moderator: Optional[bool] = Field(None, alias="is_moderator", description="是否主持人")
+    participantid: Optional[int] = Field(None, alias="participantid", description="参会人员ID")
+
 
 
 class ParticipantSchemaIn(ModelSchema):
@@ -593,9 +596,23 @@ class ParticipantSchemaIn(ModelSchema):
     participantid: Optional[int] = Field(None, description="参会人员ID")
     userid: Optional[int] = Field(None, description="关联用户ID（可选）")
     name: str = Field(..., description="姓名")
-    company: str = Field(..., description="单位")
+    company: Optional[str] = Field(None, description="单位")
     title: Optional[str] = Field(None, description="职务")
     is_moderator: Optional[bool] = Field(False, description="是否主持人")
+
+    @model_validator(mode="after")
+    def validate_with_model(self):
+        from meet.models import MeetingParticipant
+        instance = MeetingParticipant(
+            id=self.participantid,
+            meeting_id=self.meetingid,
+            name=self.name,
+            company=self.company,
+            title=self.title,
+            is_moderator=self.is_moderator,
+        )
+        instance.clean()
+        return self
     
     class Config:
         model = MeetingParticipant
@@ -644,6 +661,15 @@ def add_participant(request, data: ParticipantSchemaIn):
     try:
         participant = create(request, participant_data, MeetingParticipant)
         return participant
+    except ValidationError as e:
+        # 捕获模型验证错误（包括业务规则验证）
+        error_messages = []
+        if hasattr(e, 'message_dict'):
+            for field, messages in e.message_dict.items():
+                error_messages.extend(messages)
+        else:
+            error_messages = [str(e)]
+        raise MeetError(f"数据验证错误: {'; '.join(error_messages)}", BusinessCode.BUSINESS_ERROR.value)
     except IntegrityError as e:
         # 捕获重复添加的错误
         if "Duplicate entry" in str(e) and "meet_participant_meeting_id_name_company" in str(e):
@@ -707,102 +733,70 @@ def update_participant(request, data: ParticipantSchemaIn):
         else:
             raise MeetError(f"数据完整性错误: {str(e)}", BusinessCode.BUSINESS_ERROR.value)
         
-@require_meeting_permission('view')
 @router.get("/meeting/participant/list", response=List[ParticipantSchemaOut])
+@paginate(MyPagination)
+@require_meeting_permission('view')
 def list_meeting_participants(request, filters: ParticipantFilters = Query(...)):
     """获取会议参会人员列表（需要查看权限）"""
-    filters = data_permission(request, filters)    
-    queryset = MeetingParticipant.objects.filter(meeting_id=filters.meetingid).select_related('user', 'meeting')
-    
+    filters = data_permission(request, filters)   
+    if filters.meetingid is not None:
+        queryset = MeetingParticipant.objects.filter(meeting_id=filters.meetingid).select_related('user', 'meeting')
+    else:
+        queryset = MeetingParticipant.objects.all().select_related('user', 'meeting')
+    if filters.participantid is not None:
+        queryset = queryset.filter(id=filters.participantid)
     # 应用过滤器
     if filters.is_moderator is not None:
         queryset = queryset.filter(is_moderator=filters.is_moderator)
     
     queryset = queryset.order_by('-is_moderator', '-create_datetime')
-    return list(queryset)
-
-
-@require_meeting_permission('view')
-@router.get("/meeting/moderator/get", response=ParticipantSchemaOut)
-def get_meeting_moderator(request, meetingid: int=Query(...)):
-    """获取会议主持人（需要查看权限）"""
-    # 验证会议存在
-    meeting = get_object_or_404(Meeting, id=meetingid)
-    
-    # 获取主持人（只应该有一个）
-    try:
-        moderator = MeetingParticipant.objects.get(
-            meeting_id=meetingid, 
-            is_moderator=True
-        )
-        return moderator
-    except MeetingParticipant.DoesNotExist:
-        raise MeetError("该会议未设置主持人", BusinessCode.INSTANCE_NOT_FOUND.value)
-    except MeetingParticipant.MultipleObjectsReturned:
-        # 如果有多个主持人，说明数据不一致，需要修复
-        # 保留第一个，取消其他的主持人身份
-        moderators = MeetingParticipant.objects.filter(
-            meeting_id=meetingid, 
-            is_moderator=True
-        ).order_by('id')
-        
-        first_moderator = moderators.first()
-        # 取消其他主持人身份
-        moderators.exclude(id=first_moderator.id).update(is_moderator=False)
-        
-        return first_moderator
-
-
-@require_meeting_permission('edit')
-@router.post("/meeting/moderator/set", response=ParticipantSchemaOut)
-def set_participant_as_moderator(request, data: ParticipantSchemaIn):
-    """设置参会人员为主持人（需要编辑权限）"""
-    # 先取消其他主持人的主持人身份
-    MeetingParticipant.objects.filter(meeting_id=data.meetingid, is_moderator=True).update(is_moderator=False)
-    
-    # 设置新的主持人
-    participant = get_object_or_404(MeetingParticipant, 
-                                   id=data.participantid, 
-                                   meeting_id=data.meetingid)
-    participant.is_moderator = True
-    participant.save()
-    
-    return participant
-
-
-@require_meeting_permission('edit')
-@router.post("/meeting/moderator/unset", response=ParticipantSchemaOut)
-def unset_participant_as_moderator(request, data: ParticipantSchemaIn):
-    """取消参会人员的主持人身份（需要编辑权限）"""
-    participant = get_object_or_404(MeetingParticipant, 
-                                   id=data.participantid, 
-                                   meeting_id=data.meetingid)
-    participant.is_moderator = False
-    participant.save()
-    
-    return participant
-
-
-@require_meeting_permission('view')
-@router.get("/meeting/participant/get", response=ParticipantSchemaOut)
-def get_participant(request, meetingid: int=Query(...), participantid: int=Query(...)):
-    """获取单个参会人员详情（需要查看权限）"""
-    participant = get_object_or_404(MeetingParticipant, 
-                                   id=participantid, 
-                                   meeting_id=meetingid)
-    return participant
-
+    return queryset
 
 # ============= MeetingPhoto 会议图片相关接口 =============
 
-class PhotoFilters(MeetFilters):
-    meeting_id: int = Field(None, alias="meeting_id", description="关联会议ID")
-    photo_type: int = Field(None, alias="photo_type", description="照片类型")
+def validate_image_file(image_file) -> dict:
+    """验证图片文件的完整性和格式"""
+    validation_errors = []
+    
+    file_name = image_file.name
+    file_size = image_file.size
+    file_ext = os.path.splitext(file_name)[1].lower()
+    content_type = image_file.content_type
+    
+    # 允许的图片格式
+    ALLOWED_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']
+    ALLOWED_CONTENT_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/bmp', 'image/webp']
+    MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+    
+    # 验证文件扩展名
+    if file_ext not in ALLOWED_EXTENSIONS:
+        validation_errors.append(
+            f'不支持的图片格式: {file_ext}。支持的格式: {", ".join(ALLOWED_EXTENSIONS)}'
+        )
+    
+    # 验证Content-Type
+    if content_type not in ALLOWED_CONTENT_TYPES:
+        validation_errors.append(f'无效的文件类型: {content_type}')
+    
+    # 验证文件大小
+    if file_size > MAX_FILE_SIZE:
+        max_size_mb = MAX_FILE_SIZE // (1024 * 1024)
+        validation_errors.append(f'文件过大: {file_size // (1024 * 1024)}MB，最大允许: {max_size_mb}MB')
+    
+    if validation_errors:
+        raise MeetError('; '.join(validation_errors), BusinessCode.BUSINESS_ERROR.value)
+    
+    return {
+        'name': file_name,
+        'size': file_size,
+        'extension': file_ext,
+        'content_type': content_type
+    }
 
 
 class PhotoSchemaIn(ModelSchema):
-    meetingid: int = Field(..., description="关联会议ID", alias="meeting_id")
-    file_id: int = Field(..., description="图片文件ID")
+    meetingid: int = Field(..., description="关联会议ID", alias="meetingid")
+    fileid: int = Field(..., description="图片文件ID")
     
     class Config:
         model = MeetingPhoto
@@ -810,87 +804,125 @@ class PhotoSchemaIn(ModelSchema):
 
 
 class PhotoSchemaOut(ModelSchema):
-    meeting_id: int = Field(..., description="关联会议ID")
-    file_id: int = Field(..., description="图片文件ID")
-    file_url: str = Field(None, description="图片URL")
-    file_name: str = Field(None, description="文件名")
-    file_size: int = Field(None, description="文件大小（字节）")
-    photo_type_display: str = Field(None, description="照片类型显示名")
+    id: int = Field(..., exclude=True)
+    photoid: int = Field(..., description="关联会议ID", alias="id")
     
     class Config:
         model = MeetingPhoto
-        model_fields = "__all__"
+        model_exclude = ['remark']
     
-    @staticmethod
-    def resolve_file_url(obj):
-        return obj.file.get_absolute_url() if obj.file else None
-    
-    @staticmethod
-    def resolve_file_name(obj):
-        return obj.file.name if obj.file else None
-    
-    @staticmethod
-    def resolve_file_size(obj):
-        return obj.file.size if obj.file else None
-    
-    @staticmethod
-    def resolve_photo_type_display(obj):
-        return obj.get_photo_type_display()
+    @cached_property
+    def _file_obj(self):
+        return File.objects.filter(id=self.file).first() if self.file else None
+
+    @cached_property
+    def _photo_obj(self):
+        return MeetingPhoto.objects.filter(id=self.id).first() if self.id else None
+
+    @computed_field
+    def file_uuid(self) -> str:
+        return str(self._file_obj.uuid) if self._file_obj else None
+
+    @computed_field
+    def file_url(self) -> str:
+        return self._file_obj.get_absolute_url() if self._file_obj else None
+
+    @computed_field
+    def file_name(self) -> str:
+        return self._file_obj.name if self._file_obj else None
+
+    @computed_field
+    def file_size(self) -> int:
+        return self._file_obj.size if self._file_obj else None
+
+    @computed_field
+    def photo_type_display(self) -> str:
+        return self._photo_obj.get_photo_type_display() if self._photo_obj else None
 
 
 class PhotoUpdateSchemaIn(Schema):
-    """照片更新Schema，仅包含可修改字段"""
+    """照片更新Schema"""
+    photoid: int = Field(..., description="照片ID", alias="photoid")
     photo_type: int = Field(..., description="照片类型")
     description: str = Field(None, description="照片描述")
 
-
-class BatchPhotoDeleteSchema(Schema):
-    """批量删除照片Schema"""
-    photo_ids: List[int] = Field(..., description="照片ID列表")
-
-
 @require_meeting_edit_permission
-@router.post("/meeting/{meeting_id}/photo", response=PhotoSchemaOut)
-def upload_meeting_photo(request, meeting_id: int, data: PhotoSchemaIn):
-    """上传会议照片（需要编辑权限）"""
+@router.post("/meeting/photo/upload", response=PhotoSchemaOut)
+def upload_meeting_photo(request, meetingid: int=(Query(...))):
+    """
+    上传会议照片（需要编辑权限）
+    同一场会议，一种类型的图片最多上传5张
+    
+    参数：
+    - meetingid: 会议ID (Query参数)
+    - type: 照片类型 (FormData: 1=会议照片, 2=签到表)
+    - description: 照片描述 (FormData, 可选)
+    - image: 图片文件 (FormData)
+    """
     try:
-        photo_data = data.dict()
-        photo_data['meeting_id'] = meeting_id
+        meeting = get_object_or_404(Meeting, id=meetingid)
+
+        # 1. 验证文件上传
+        if 'image' not in request.FILES:
+            raise MeetError('没有上传图片文件', BusinessCode.BUSINESS_ERROR.value)
         
-        # 验证文件存在且是图片类型
-        file = get_object_or_404(File, id=photo_data['file_id'])
+        image_file = request.FILES['image']
+        file_info = validate_image_file(image_file)
         
-        # 验证文件类型（可选：加强安全性）
-        allowed_image_types = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp']
-        file_ext = file.save_name.split('.')[-1].lower() if file.save_name else ''
-        if file_ext not in allowed_image_types:
-            raise MeetError("文件类型不支持，请上传图片文件", BusinessCode.BUSINESS_ERROR)
+        # 2. 获取表单数据
+        photo_type = request.POST.get('photo_type')
+        description = request.POST.get('description', '')
         
-        # 验证照片类型有效性
-        photo_type = photo_data.get('photo_type')
+        # 3. 验证照片类型
+        if not photo_type:
+            raise MeetError('缺少照片类型参数', BusinessCode.BUSINESS_ERROR.value)
+        
+        try:
+            photo_type = int(photo_type)
+        except ValueError:
+            raise MeetError('照片类型必须是数字', BusinessCode.BUSINESS_ERROR.value)
+        
         valid_types = [choice[0] for choice in MeetingPhoto.PHOTO_TYPE_CHOICES]
         if photo_type not in valid_types:
-            raise MeetError("无效的照片类型", BusinessCode.BUSINESS_ERROR)
+            raise MeetError("无效的照片类型", BusinessCode.BUSINESS_ERROR.value)
         
-        photo_data['file_id'] = photo_data.pop('file_id')
-        photo = create(request, photo_data, MeetingPhoto)
-        return photo
+        # 4. 验证数量限制
+        existing_count = meeting.photos.filter(photo_type=photo_type).count()
+        if existing_count >= 5:
+            photo_type_name = dict(MeetingPhoto.PHOTO_TYPE_CHOICES)[photo_type]
+            raise MeetError(f'每个会议的{photo_type_name}最多只能上传5张，当前已有{existing_count}张', 
+                          BusinessCode.BUSINESS_ERROR.value)
         
+        # 5. 使用事务确保数据一致性
+        with transaction.atomic():
+            # 创建File记录
+            file_record = File.create_from_file(image_file, file_info['name'])
+            
+            # 创建MeetingPhoto记录
+            photo = MeetingPhoto.objects.create(
+                meeting=meeting,
+                file=file_record,
+                photo_type=photo_type,
+                description=description
+            )
+            
+            return photo
+            
     except Exception as e:
         logger.error(f"上传会议照片失败: {str(e)}")
         if isinstance(e, MeetError):
             raise
-        raise MeetError("上传照片失败", BusinessCode.SERVER_ERROR)
+        raise MeetError("上传照片失败", BusinessCode.SERVER_ERROR.value)
 
+class PhotoDeleteSchemaIn(Schema):
+    photoid: int = Field(..., description="照片ID")
 
+@router.post("/meeting/photo/delete")
 @require_meeting_edit_permission
-@router.delete("/meeting/{meeting_id}/photo/{photo_id}")
-def delete_meeting_photo(request, meeting_id: int, photo_id: int):
+def delete_meeting_photo(request, data: PhotoDeleteSchemaIn):
     """删除会议照片（需要编辑权限）"""
     try:
-        photo = get_object_or_404(MeetingPhoto, 
-                                 id=photo_id, 
-                                 meeting_id=meeting_id)
+        photo = get_object_or_404(MeetingPhoto, id=data.photoid)
         
         # 记录删除的文件信息用于日志
         file_name = photo.file.name if photo.file else "未知"
@@ -898,8 +930,8 @@ def delete_meeting_photo(request, meeting_id: int, photo_id: int):
         
         photo.delete()
         
-        logger.info(f"删除会议照片成功 - 会议ID: {meeting_id}, 照片: {file_name}, 类型: {photo_type}")
-        return {"success": True, "message": "照片删除成功"}
+        logger.info(f"删除会议照片成功 - 会议ID: {data.photoid}, 照片: {file_name}, 类型: {photo_type}")
+        return MeetResponse(errcode=BusinessCode.OK)
         
     except Exception as e:
         logger.error(f"删除会议照片失败: {str(e)}")
@@ -908,56 +940,22 @@ def delete_meeting_photo(request, meeting_id: int, photo_id: int):
         raise MeetError("删除照片失败", BusinessCode.SERVER_ERROR)
 
 
+@router.put("/meeting/photo/update", response=PhotoSchemaOut)
 @require_meeting_edit_permission
-@router.post("/meeting/{meeting_id}/photos/batch-delete")
-def batch_delete_meeting_photos(request, meeting_id: int, data: BatchPhotoDeleteSchema):
-    """批量删除会议照片（需要编辑权限）"""
-    try:
-        photo_ids = data.photo_ids
-        if not photo_ids:
-            raise MeetError("请选择要删除的照片", BusinessCode.BUSINESS_ERROR)
-        
-        # 验证所有照片都属于该会议
-        photos = MeetingPhoto.objects.filter(
-            id__in=photo_ids, 
-            meeting_id=meeting_id
-        )
-        
-        if len(photos) != len(photo_ids):
-            raise MeetError("部分照片不存在或不属于该会议", BusinessCode.BUSINESS_ERROR)
-        
-        deleted_count = len(photos)
-        photos.delete()
-        
-        logger.info(f"批量删除会议照片成功 - 会议ID: {meeting_id}, 删除数量: {deleted_count}")
-        return {
-            "success": True, 
-            "message": f"成功删除 {deleted_count} 张照片",
-            "deleted_count": deleted_count
-        }
-        
-    except Exception as e:
-        logger.error(f"批量删除会议照片失败: {str(e)}")
-        if isinstance(e, MeetError):
-            raise
-        raise MeetError("批量删除照片失败", BusinessCode.SERVER_ERROR)
-
-
-@require_meeting_edit_permission
-@router.put("/meeting/{meeting_id}/photo/{photo_id}", response=PhotoSchemaOut)
-def update_meeting_photo(request, meeting_id: int, photo_id: int, data: PhotoUpdateSchemaIn):
+def update_meeting_photo(request, data: PhotoUpdateSchemaIn):
     """更新会议照片信息（需要编辑权限）"""
     try:
         photo = get_object_or_404(MeetingPhoto, 
-                                 id=photo_id, 
-                                 meeting_id=meeting_id)
+                                 id=data.photoid, 
+                                 meeting_id=data.meetingid,
+                                 photo_type=data.type)
         
         photo_data = data.dict(exclude_unset=True)  # 只更新提供的字段
         
         # 验证照片类型有效性
-        if 'photo_type' in photo_data:
+        if 'type' in photo_data:
             valid_types = [choice[0] for choice in MeetingPhoto.PHOTO_TYPE_CHOICES]
-            if photo_data['photo_type'] not in valid_types:
+            if photo_data['type'] not in valid_types:
                 raise MeetError("无效的照片类型", BusinessCode.BUSINESS_ERROR)
         
         # 更新字段
@@ -973,20 +971,25 @@ def update_meeting_photo(request, meeting_id: int, photo_id: int, data: PhotoUpd
             raise
         raise MeetError("更新照片信息失败", BusinessCode.SERVER_ERROR)
 
+class PhotoFilters(MeetFilters):
+    meetingid: int = Field(None, alias="meetingid", description="关联会议ID")
+    photoid: int = Field(None, alias="photoid", description="照片ID")
+    photo_type: int = Field(None, alias="photo_type", description="照片类型")
 
+@router.get("/meeting/photo/list", response=List[PhotoSchemaOut])
+@paginate(MyPagination)
 @require_meeting_view_permission
-@router.get("/meeting/{meeting_id}/photos", response=List[PhotoSchemaOut])
-def list_meeting_photos(request, meeting_id: int, photo_type: int = None):
+def list_meeting_photos(request, filters: PhotoFilters = Query(...)):
     """获取会议照片列表（需要查看权限）"""
     try:
-        queryset = MeetingPhoto.objects.filter(meeting_id=meeting_id)
+        queryset = MeetingPhoto.objects.filter(meeting_id=filters.meetingid)
         
-        if photo_type is not None:
+        if filters.photo_type is not None:
             # 验证照片类型有效性
             valid_types = [choice[0] for choice in MeetingPhoto.PHOTO_TYPE_CHOICES]
-            if photo_type not in valid_types:
-                raise MeetError("无效的照片类型", BusinessCode.BUSINESS_ERROR)
-            queryset = queryset.filter(photo_type=photo_type)
+            if filters.photo_type not in valid_types:
+                raise MeetError("无效的照片类型", BusinessCode.BUSINESS_ERROR.value)
+            queryset = queryset.filter(photo_type=filters.photo_type)
         
         photos = queryset.select_related('file').order_by('photo_type', '-create_datetime')
         return list(photos)
@@ -995,67 +998,7 @@ def list_meeting_photos(request, meeting_id: int, photo_type: int = None):
         logger.error(f"获取会议照片列表失败: {str(e)}")
         if isinstance(e, MeetError):
             raise
-        raise MeetError("获取照片列表失败", BusinessCode.SERVER_ERROR)
-
-
-@require_meeting_view_permission
-@router.get("/meeting/{meeting_id}/photos/meeting", response=List[PhotoSchemaOut])
-def list_meeting_photos_only(request, meeting_id: int):
-    """获取会议照片（不包含签到表）"""
-    return list_meeting_photos(request, meeting_id, photo_type=1)
-
-
-@require_meeting_view_permission
-@router.get("/meeting/{meeting_id}/photos/signin", response=List[PhotoSchemaOut])
-def list_signin_photos(request, meeting_id: int):
-    """获取签到表照片"""
-    return list_meeting_photos(request, meeting_id, photo_type=2)
-
-
-@require_meeting_view_permission
-@router.get("/meeting/{meeting_id}/photo/{photo_id}", response=PhotoSchemaOut)
-def get_meeting_photo_detail(request, meeting_id: int, photo_id: int):
-    """获取单张照片详情（需要查看权限）"""
-    try:
-        photo = get_object_or_404(MeetingPhoto, 
-                                 id=photo_id, 
-                                 meeting_id=meeting_id)
-        return photo
-        
-    except Exception as e:
-        logger.error(f"获取照片详情失败: {str(e)}")
-        raise MeetError("获取照片详情失败", BusinessCode.SERVER_ERROR)
-
-
-@require_meeting_view_permission
-@router.get("/meeting/{meeting_id}/photos/count")
-def get_meeting_photos_count(request, meeting_id: int):
-    """获取会议照片统计信息"""
-    try:
-        total_count = MeetingPhoto.objects.filter(meeting_id=meeting_id).count()
-        meeting_photos_count = MeetingPhoto.objects.filter(
-            meeting_id=meeting_id, 
-            photo_type=1
-        ).count()
-        signin_photos_count = MeetingPhoto.objects.filter(
-            meeting_id=meeting_id, 
-            photo_type=2
-        ).count()
-        
-        return {
-            "total_count": total_count,
-            "meeting_photos_count": meeting_photos_count,
-            "signin_photos_count": signin_photos_count,
-            "breakdown": {
-                "会议照片": meeting_photos_count,
-                "签到表": signin_photos_count
-            }
-        }
-        
-    except Exception as e:
-        logger.error(f"获取照片统计失败: {str(e)}")
-        raise MeetError("获取照片统计失败", BusinessCode.SERVER_ERROR)
-
+        raise MeetError("获取照片列表失败", BusinessCode.SERVER_ERROR.value)
 
 # ============= 聚合接口 =============
 

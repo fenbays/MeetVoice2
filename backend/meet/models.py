@@ -1,6 +1,7 @@
 from django.db import models
 from django.contrib.auth import get_user_model
 from django.core.validators import MinValueValidator, MaxValueValidator
+from utils.meet_response import BusinessCode, MeetError
 from utils.models import CoreModel
 from system.models import File
 
@@ -297,8 +298,28 @@ class MeetingParticipant(CoreModel):
     is_moderator = models.BooleanField(default=False, verbose_name="是否主持人", 
                                       help_text="是否为会议主持人")
     
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        
+        # 规则1：主持人可以只填姓名，普通参会人员必须填写姓名和单位
+        if not self.is_moderator and not self.company:
+            raise MeetError('普通参会人员必须填写单位信息', BusinessCode.BUSINESS_ERROR.value)
+
+        
+        # 规则2：每个会议只能有一个主持人
+        if self.is_moderator:
+            existing_moderator = MeetingParticipant.objects.filter(
+                meeting=self.meeting, 
+                is_moderator=True
+            ).exclude(pk=self.pk)  # 排除自己（更新时）
+            
+            if existing_moderator.exists():
+                raise MeetError('每个会议只能有一个主持人', BusinessCode.BUSINESS_ERROR.value)
+                    
+    
     # 自动从关联用户填充信息（如果有的话）
     def save(self, *args, **kwargs):
+        self.clean()
         if self.user and not self.name:
             self.name = self.user.name
             # 可以从用户信息自动填充单位等
@@ -308,10 +329,9 @@ class MeetingParticipant(CoreModel):
         db_table = "meet_participant"
         verbose_name = "参会人员"
         verbose_name_plural = verbose_name
-        # 同一会议中，同一用户只能有一条记录
+        # 简化约束：只保留必要的唯一性约束
         unique_together = [
             ['meeting', 'user'],  # 同一会议中，同一用户只能有一条记录
-            ['meeting', 'name', 'company']  # 同一会议中，姓名和单位不能完全相同
         ]
         ordering = ['-is_moderator', 'name']  # 主持人排在前面
         
@@ -320,7 +340,6 @@ class MeetingParticipant(CoreModel):
         company_info = f"（{self.company}）" if self.company else ""
         return f"{self.name}{company_info}{role}"
 
-# 会议照片保持简单设计
 class MeetingPhoto(CoreModel):
     """会议图片表"""
     meeting = models.ForeignKey(Meeting, on_delete=models.CASCADE, related_name='photos',
@@ -334,7 +353,29 @@ class MeetingPhoto(CoreModel):
     photo_type = models.IntegerField(choices=PHOTO_TYPE_CHOICES, verbose_name="照片类型")
     description = models.CharField(max_length=200, blank=True, null=True, 
                                   verbose_name="描述", help_text="照片描述")
+
+    def clean(self):
+        """验证照片数量限制"""
+        from django.core.exceptions import ValidationError
+        
+        # 检查同一会议同一类型的照片数量
+        if self.meeting and self.photo_type:
+            existing_count = MeetingPhoto.objects.filter(
+                meeting=self.meeting,
+                photo_type=self.photo_type
+            ).exclude(pk=self.pk).count()  # 排除自己（更新时）
+            
+            if existing_count >= 5:
+                photo_type_name = dict(self.PHOTO_TYPE_CHOICES)[self.photo_type]
+                raise MeetError(
+                    f'每个会议的{photo_type_name}最多只能上传5张，当前已有{existing_count}张',
+                    BusinessCode.BUSINESS_ERROR.value
+                )
     
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
     class Meta:
         db_table = "meet_photo"
         verbose_name = "会议照片"

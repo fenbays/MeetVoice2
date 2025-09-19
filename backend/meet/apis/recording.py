@@ -729,8 +729,8 @@ class SegmentSchemaOut(ModelSchema):
         return recordingid
 
 @router.post("/segment/list", response=List[SegmentSchemaOut])
-@require_meeting_permission('view')
 @paginate(MyPagination)
+@require_meeting_permission('view')
 def list_segment(request, filters: SegmentFilters):
     """分页获取转录片段列表"""
     filters = data_permission(request, filters)       

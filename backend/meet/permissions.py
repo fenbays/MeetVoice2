@@ -6,7 +6,7 @@ import json
 import inspect
 from functools import wraps
 from django.shortcuts import get_object_or_404
-from meet.models import Meeting, Recording, Segment, Speaker
+from meet.models import Meeting, MeetingPhoto, Recording, Segment, Speaker
 from system.models import Users
 from utils.usual import get_user_info_from_token
 from utils.meet_response import MeetError, BusinessCode
@@ -51,7 +51,9 @@ def _get_meeting_from_request(request, *args, **kwargs):
     id_type, id_value = get_id_from_sources(['meetingid', 'meeting_id', 
                                            'recordingid', 'recording_id',
                                            'speakerid', 'speaker_id', 
-                                           'segmentid', 'segment_id'])
+                                           'segmentid', 'segment_id',
+                                           'photoid', 'photo_id'
+                                           ])
     
     if not id_value:
         raise MeetError("缺少必要的ID参数", BusinessCode.BUSINESS_ERROR.value)
@@ -82,6 +84,11 @@ def _get_meeting_from_request(request, *args, **kwargs):
             segment = Segment.objects.select_related('recording__meeting').get(id=id_value)
             kwargs['segment'] = segment
             return segment.recording.meeting
+        
+        elif id_type in ['photoid', 'photo_id']:
+            photo = MeetingPhoto.objects.select_related('meeting').get(id=id_value)
+            kwargs['photo'] = photo
+            return photo.meeting
             
     except (Meeting.DoesNotExist, Recording.DoesNotExist, Speaker.DoesNotExist):
         raise MeetError("请求的资源不存在", BusinessCode.INSTANCE_NOT_FOUND.value)
