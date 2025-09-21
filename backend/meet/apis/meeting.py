@@ -118,31 +118,49 @@ class MeetingParticipantSchemaOut(ModelSchema):
         model = MeetingParticipant
         model_exclude = ["id"]
 
-class MeetingPhotoSchemaOut(ModelSchema):
-    """会议照片Schema"""
-    photoid: int = Field(..., alias="id")
+class PhotoSchemaOut(ModelSchema):
+    id: int = Field(..., exclude=True)
+    photoid: int = Field(..., description="关联会议ID", alias="id")
     
     class Config:
         model = MeetingPhoto
-        model_exclude = ["id"]
+        model_exclude = ['remark']
     
-    @computed_field(description="文件URL")
+    @cached_property
+    def _file_obj(self):
+        return File.objects.filter(id=self.file).first() if self.file else None
+
+    @cached_property
+    def _photo_obj(self):
+        return MeetingPhoto.objects.filter(id=self.id).first() if self.id else None
+
+    @computed_field
+    def file_uuid(self) -> str:
+        return str(self._file_obj.uuid) if self._file_obj else None
+
+    @computed_field
     def file_url(self) -> str:
-        if self.file and hasattr(self.file, 'url'):
-            return self.file.url
-        return ""
-    
-    @computed_field(description="照片类型文本")
-    def photo_type_text(self) -> str:
-        return self.get_photo_type_display()
+        return self._file_obj.get_absolute_url() if self._file_obj else None
+
+    @computed_field
+    def file_name(self) -> str:
+        return self._file_obj.name if self._file_obj else None
+
+    @computed_field
+    def file_size(self) -> int:
+        return self._file_obj.size if self._file_obj else None
+
+    @computed_field
+    def photo_type_display(self) -> str:
+        return self._photo_obj.get_photo_type_display() if self._photo_obj else None
 
 class MeetingDetailSchemaOut(ModelSchema):
     """会议详情Schema - 包含所有相关信息"""
     meetingid: int = Field(..., alias="id")
     participants: List[MeetingParticipantSchemaOut] = Field(default=[], description="参会人员列表")
-    photos: List[MeetingPhotoSchemaOut] = Field(default=[], description="所有会议照片")
-    meeting_photos: List[MeetingPhotoSchemaOut] = Field(default=[], description="会议照片（非签到表）")
-    signin_photos: List[MeetingPhotoSchemaOut] = Field(default=[], description="签到表照片")
+    photos: List[PhotoSchemaOut] = Field(default=[], description="所有会议照片")
+    meeting_photos: List[PhotoSchemaOut] = Field(default=[], description="会议照片（非签到表）")
+    signin_photos: List[PhotoSchemaOut] = Field(default=[], description="签到表照片")
     speakers: List[SpeakerSchemaOut] = Field(default=[], description="发言人列表")
     
     class Config:
@@ -802,50 +820,6 @@ class PhotoSchemaIn(ModelSchema):
         model = MeetingPhoto
         model_exclude = ['id', 'meeting', 'file', 'create_datetime', 'update_datetime']
 
-
-class PhotoSchemaOut(ModelSchema):
-    id: int = Field(..., exclude=True)
-    photoid: int = Field(..., description="关联会议ID", alias="id")
-    
-    class Config:
-        model = MeetingPhoto
-        model_exclude = ['remark']
-    
-    @cached_property
-    def _file_obj(self):
-        return File.objects.filter(id=self.file).first() if self.file else None
-
-    @cached_property
-    def _photo_obj(self):
-        return MeetingPhoto.objects.filter(id=self.id).first() if self.id else None
-
-    @computed_field
-    def file_uuid(self) -> str:
-        return str(self._file_obj.uuid) if self._file_obj else None
-
-    @computed_field
-    def file_url(self) -> str:
-        return self._file_obj.get_absolute_url() if self._file_obj else None
-
-    @computed_field
-    def file_name(self) -> str:
-        return self._file_obj.name if self._file_obj else None
-
-    @computed_field
-    def file_size(self) -> int:
-        return self._file_obj.size if self._file_obj else None
-
-    @computed_field
-    def photo_type_display(self) -> str:
-        return self._photo_obj.get_photo_type_display() if self._photo_obj else None
-
-
-class PhotoUpdateSchemaIn(Schema):
-    """照片更新Schema"""
-    photoid: int = Field(..., description="照片ID", alias="photoid")
-    photo_type: int = Field(..., description="照片类型")
-    description: str = Field(None, description="照片描述")
-
 @require_meeting_edit_permission
 @router.post("/meeting/photo/upload", response=PhotoSchemaOut)
 def upload_meeting_photo(request, meetingid: int=(Query(...))):
@@ -939,37 +913,32 @@ def delete_meeting_photo(request, data: PhotoDeleteSchemaIn):
             raise
         raise MeetError("删除照片失败", BusinessCode.SERVER_ERROR)
 
+class PhotoUpdateSchemaIn(Schema):
+    """照片更新Schema"""
+    photoid: int = Field(..., description="照片ID", alias="photoid")
+    photo_type: int = Field(..., description="照片类型")
+    description: str = Field(None, description="照片描述")
 
-@router.put("/meeting/photo/update", response=PhotoSchemaOut)
+@router.post("/meeting/photo/update", response=PhotoSchemaOut)
 @require_meeting_edit_permission
 def update_meeting_photo(request, data: PhotoUpdateSchemaIn):
     """更新会议照片信息（需要编辑权限）"""
-    try:
-        photo = get_object_or_404(MeetingPhoto, 
-                                 id=data.photoid, 
-                                 meeting_id=data.meetingid,
-                                 photo_type=data.type)
-        
-        photo_data = data.dict(exclude_unset=True)  # 只更新提供的字段
-        
-        # 验证照片类型有效性
-        if 'type' in photo_data:
+    photo = get_object_or_404(MeetingPhoto, id=data.photoid)
+    try:    
+        photo_data = data.dict(exclude_unset=True)
+        if 'photo_type' in photo_data:
             valid_types = [choice[0] for choice in MeetingPhoto.PHOTO_TYPE_CHOICES]
-            if photo_data['type'] not in valid_types:
-                raise MeetError("无效的照片类型", BusinessCode.BUSINESS_ERROR)
-        
-        # 更新字段
+            if photo_data['photo_type'] not in valid_types:
+                raise MeetError("无效的照片类型", BusinessCode.BUSINESS_ERROR.value)
         for field, value in photo_data.items():
-            setattr(photo, field, value)
-        
+            setattr(photo, field, value)        
         photo.save()
-        return photo
-        
+        return photo        
     except Exception as e:
         logger.error(f"更新会议照片失败: {str(e)}")
         if isinstance(e, MeetError):
             raise
-        raise MeetError("更新照片信息失败", BusinessCode.SERVER_ERROR)
+        raise MeetError("更新照片信息失败", BusinessCode.SERVER_ERROR.value)
 
 class PhotoFilters(MeetFilters):
     meetingid: int = Field(None, alias="meetingid", description="关联会议ID")
@@ -982,8 +951,14 @@ class PhotoFilters(MeetFilters):
 def list_meeting_photos(request, filters: PhotoFilters = Query(...)):
     """获取会议照片列表（需要查看权限）"""
     try:
-        queryset = MeetingPhoto.objects.filter(meeting_id=filters.meetingid)
+        if not filters.meetingid and not filters.photoid:
+            raise MeetError("meetingid 或 photoid 至少需要提供一个", BusinessCode.BUSINESS_ERROR.value)
         
+        queryset = MeetingPhoto.objects.all()
+        if filters.meetingid is not None:
+            queryset = queryset.filter(meeting_id=filters.meetingid)
+        if filters.photoid is not None:
+            queryset = queryset.filter(id=filters.photoid)        
         if filters.photo_type is not None:
             # 验证照片类型有效性
             valid_types = [choice[0] for choice in MeetingPhoto.PHOTO_TYPE_CHOICES]
@@ -999,66 +974,3 @@ def list_meeting_photos(request, filters: PhotoFilters = Query(...)):
         if isinstance(e, MeetError):
             raise
         raise MeetError("获取照片列表失败", BusinessCode.SERVER_ERROR.value)
-
-# ============= 聚合接口 =============
-
-class MeetingDetailSchema(Schema):
-    meeting: MeetingSchemaOut
-    participants: List[ParticipantSchemaOut] = []
-    photos: List[PhotoSchemaOut] = []
-    recordings: List[RecordingSchemaOut] = []
-    summary: SummarySchemaOut = None
-
-
-@require_meeting_view_permission
-@router.get("/meeting/{meeting_id}/detail")
-def get_meeting_detail(request, meeting_id: int):
-    """获取会议完整详情（包含参会人员、照片、录音和纲要）"""
-    meeting = get_object_or_404(Meeting, id=meeting_id)
-    
-    # 获取参会人员
-    participants = list(MeetingParticipant.objects.filter(
-        meeting_id=meeting_id
-    ).select_related('user').order_by('-is_moderator', 'name'))
-    
-    # 获取照片
-    photos = list(MeetingPhoto.objects.filter(
-        meeting_id=meeting_id
-    ).select_related('file').order_by('photo_type', '-create_datetime'))
-    
-    # 获取录音
-    recordings = list(Recording.objects.filter(meeting_id=meeting_id))
-    
-    # 获取纲要
-    try:
-        summary = MeetingSummary.objects.get(meeting_id=meeting_id)
-    except MeetingSummary.DoesNotExist:
-        summary = None
-    
-    return MeetResponse(data={
-        "meeting": meeting,
-        "participants": participants,
-        "photos": photos, 
-        "recordings": recordings,
-        "summary": summary
-    })
-
-
-class RecordingDetailSchema(Schema):
-    recording: RecordingSchemaOut
-    speakers: List[SpeakerSchemaOut]
-    transcripts: List[SegmentSchemaOut]
-
-
-@router.get("/recording/{recording_id}/detail")
-def get_recording_detail(request, recording_id: int):
-    """获取录音完整详情（包含说话人和转录）"""
-    recording = get_object_or_404(Recording, id=recording_id)
-    speakers = list(Speaker.objects.filter(recording_id=recording_id))
-    transcripts = list(Segment.objects.filter(recording_id=recording_id).order_by('start_time'))
-    
-    return MeetResponse(data={
-        "recording": recording,
-        "speakers": speakers,
-        "transcripts": transcripts
-    })

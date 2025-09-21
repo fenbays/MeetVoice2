@@ -5,6 +5,7 @@ from meetvoice.settings import TOKEN_LIFETIME
 class TokenManager:
     def __init__(self):
         self.prefix = "active_tokens"
+        self.invite_prefix = "invite_tokens"
     
     def store_token(self, user_id: int, token: str, device_id: str = None):
         """存储token - 缓存TTL只是兜底，真正过期由JWT控制"""
@@ -34,7 +35,29 @@ class TokenManager:
         pattern = f"{self.prefix}:{user_id}:*"
         for key in cache.keys(pattern):
             cache.delete(key)
-    
+
+    # 邀请token    
     def refresh_user_permission(self, user_id: int):
         """清理相关token"""
         self.revoke_user_all_tokens(user_id)
+
+    def store_invite_token(self, email: str, token: str, expire_days: int = 7):
+        """存储邀请token"""
+        key = f"{self.invite_prefix}:{email}"
+        timeout = expire_days * 24 * 3600  # 转换为秒
+        cache.set(key, token, timeout=timeout)
+    
+    def get_invite_token(self, email: str) -> str:
+        """获取邀请token"""
+        key = f"{self.invite_prefix}:{email}"
+        return cache.get(key)
+    
+    def is_invite_token_valid(self, email: str, token: str) -> bool:
+        """验证邀请token"""
+        stored_token = self.get_invite_token(email)
+        return stored_token == token if stored_token else False
+    
+    def revoke_invite_token(self, email: str):
+        """撤销邀请token"""
+        key = f"{self.invite_prefix}:{email}"
+        cache.delete(key)

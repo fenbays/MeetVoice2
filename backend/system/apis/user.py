@@ -74,7 +74,6 @@ def update_user(request, payload: SchemaIn):
     
     # 检查是否在更新自己的信息
     if not hasattr(payload, 'id') or payload.id != current_user_id:
-        logger.warning(f'只能更新自己的信息1: {payload.id} != {current_user_id}')
         return MeetResponse(
             errcode=BusinessCode.PERMISSION_DENIED, 
             errmsg='只能更新自己的信息'

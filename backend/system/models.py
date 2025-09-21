@@ -14,6 +14,7 @@ class Users(AbstractUser, CoreModel):
     avatar = models.TextField(verbose_name="头像", null=True, blank=True, help_text="头像")
     name = models.CharField(max_length=40, verbose_name="姓名", help_text="姓名")
     status = models.BooleanField(default=True, verbose_name="状态", help_text="状态")
+    
     GENDER_CHOICES = (
         (0, "女"),
         (1, "男"),
