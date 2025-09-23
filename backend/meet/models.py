@@ -1,3 +1,4 @@
+from django.utils import timezone
 from django.db import models
 from django.contrib.auth import get_user_model
 from django.core.validators import MinValueValidator, MaxValueValidator
@@ -43,6 +44,52 @@ class Meeting(CoreModel):
     owner = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, 
                              related_name="owned_meetings",
                              verbose_name="所属人", help_text="会议所属人")
+
+    DELETE_STATUS_CHOICES = [
+        (0, '正常'),
+        (1, '软删除'),
+        (2, '硬删除'),
+    ]
+    delete_status = models.IntegerField(
+        choices=DELETE_STATUS_CHOICES, 
+        default=0, 
+        verbose_name="删除状态", 
+        help_text="删除状态标识"
+    )
+    deleted_datetime = models.DateTimeField(
+        null=True, 
+        blank=True, 
+        verbose_name="删除时间", 
+        help_text="删除时间"
+    )
+    deleted_reason = models.CharField(
+        max_length=255, 
+        null=True, 
+        blank=True, 
+        verbose_name="删除原因", 
+        help_text="删除原因"
+    )
+        
+    def soft_delete(self, reason=None):
+        """软删除：放入回收站"""
+        self.delete_status = 1
+        self.deleted_datetime = timezone.now()
+        self.deleted_reason = reason
+        self.save(update_fields=['delete_status', 'deleted_datetime', 'deleted_reason'])
+    
+    def hard_delete(self, reason=None):
+        """硬删除：标记为彻底删除，但数据仍保留"""
+        self.delete_status = 2
+        self.deleted_datetime = timezone.now()
+        self.deleted_reason = reason
+        self.save(update_fields=['delete_status', 'deleted_datetime', 'deleted_reason'])
+    
+    def restore(self):
+        """恢复：从删除状态恢复到正常"""
+        self.delete_status = 0
+        self.deleted_datetime = None
+        self.deleted_reason = None
+        self.save(update_fields=['delete_status', 'deleted_datetime', 'deleted_reason'])
 
     def can_upload_recording(self):
         """检查是否可以上传录音"""
@@ -315,6 +362,19 @@ class MeetingParticipant(CoreModel):
             
             if existing_moderator.exists():
                 raise MeetError('每个会议只能有一个主持人', BusinessCode.BUSINESS_ERROR.value)
+        
+         # 规则3：同一会议中姓名+单位不能重复
+        if self.meeting and self.name:
+            # 构建查询条件：同一会议 + 相同姓名 + 相同单位
+            query = MeetingParticipant.objects.filter(
+                meeting=self.meeting,
+                name=self.name,
+                company=self.company  # 包括 None 值
+            ).exclude(pk=self.pk)  # 排除自己（更新时）
+            
+            if query.exists():
+                company_info = f"（{self.company}）" if self.company else "（无单位）"
+                raise MeetError(f'该会议中已存在姓名和单位相同的参会人员：{self.name}{company_info}', BusinessCode.BUSINESS_ERROR.value)
                     
     
     # 自动从关联用户填充信息（如果有的话）
@@ -332,6 +392,7 @@ class MeetingParticipant(CoreModel):
         # 简化约束：只保留必要的唯一性约束
         unique_together = [
             ['meeting', 'user'],  # 同一会议中，同一用户只能有一条记录
+            ['meeting', 'name', 'company'],  # 同一会议中，姓名+单位不能重复
         ]
         ordering = ['-is_moderator', 'name']  # 主持人排在前面
         

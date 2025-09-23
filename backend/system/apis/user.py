@@ -28,7 +28,8 @@ class Filters(MeetFilters):
 
 
 class SchemaIn(ModelSchema):
-    dept_id: Optional[int] = Field(None, alias="dept")
+    id: int = Field(..., alias="userid")
+    dept_id: Optional[int] = Field(None, alias="deptid")
     email: Optional[str] = Field(None, alias="email")
     mobile: Optional[str] = Field(None, alias="mobile")
     name: Optional[str] = Field(None, alias="name")

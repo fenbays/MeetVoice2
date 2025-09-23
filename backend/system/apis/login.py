@@ -68,7 +68,7 @@ def login(request, data: LoginSchema):
     return data
 
 
-@router.get("/logout", auth=None)
+@router.post("/logout", auth=None)
 def get_post(request):
     auth_header = request.META.get("HTTP_AUTHORIZATION")
     token = auth_header.split(" ")[1] if auth_header and auth_header.startswith("Bearer ") else None

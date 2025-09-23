@@ -344,10 +344,8 @@ def generate_meeting_report_task(meetingid: int):
         
         # 保存markdown文件
         md_filename = f"{meeting.title}-会议报告.md"
-        md_file = File.objects.create(
-            name=md_filename,
-            file=ContentFile(md_content.encode(), name=md_filename)
-        )
+        content_file = ContentFile(md_content.encode(), name=md_filename)
+        md_file = File.create_from_file(content_file, name=md_filename)
         
         # 更新状态
         summary.report_file = md_file

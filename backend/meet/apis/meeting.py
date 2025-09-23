@@ -59,30 +59,23 @@ def get_user_meetings_queryset(user_obj)->QuerySet[Meeting]:
         raise ValueError("用户对象不能为None")
     
     # 获取用户拥有的会议ID
-    owned_meeting_ids = Meeting.objects.filter(owner=user_obj).values_list('id', flat=True)
+    owned_meeting_ids = Meeting.objects.filter(owner=user_obj, delete_status=0).values_list('id', flat=True)
     
     # 获取分享给用户的会议ID
     shared_meeting_ids = MeetingShare.objects.filter(
         shared_user=user_obj, 
-        is_active=True
+        is_active=True,
+        meeting__delete_status=0
     ).values_list('meeting_id', flat=True)
     
     # 合并所有会议ID
     all_meeting_ids = list(owned_meeting_ids) + list(shared_meeting_ids)
     
     # 返回合并后的QuerySet，按创建时间倒序
-    return Meeting.objects.filter(id__in=all_meeting_ids).order_by('-create_datetime')
+    return Meeting.objects.filter(id__in=all_meeting_ids, delete_status=0).order_by('-create_datetime')
 
 
 # ============= Meeting 相关接口 =============
-
-class MeetingFilters(MeetFilters):
-    title: Optional[str] = Field(None, alias="title")
-    status: Optional[int] = Field(None, alias="status")
-    start_time__gte: Optional[datetime] = Field(None, alias="start_time__gte")
-    start_time__lte: Optional[datetime] = Field(None, alias="start_time__lte")
-
-
 class MeetingSchemaIn(ModelSchema):
     id: Optional[int] = Field(None, alias="meetingid")
     class Config:
@@ -202,7 +195,8 @@ def get_meeting(request, meetingid: int=Query(...)):
             'photos__file', 
             'recordings__speakers'
         ), 
-        id=meetingid
+        id=meetingid,
+        delete_status=0
     )
     # 获取参会人员
     participants = list(meeting.participants.all())
@@ -235,8 +229,20 @@ def get_meeting(request, meetingid: int=Query(...)):
 @require_meeting_permission('owner')
 def update_meeting(request, data: MeetingSchemaIn):
     """更新会议信息（需要编辑权限）"""
+    try:
+        meeting = Meeting.objects.get(id=data.id, delete_status=0)
+    except Meeting.DoesNotExist:
+        raise MeetError("会议不存在或已被删除", BusinessCode.INSTANCE_NOT_FOUND.value)
+    
     meeting = update(request, data.id, data, Meeting)
     return meeting
+
+
+class MeetingFilters(MeetFilters):
+    title: Optional[str] = Field(None, alias="title")
+    status: Optional[int] = Field(None, alias="status")
+    start_time__gte: Optional[datetime] = Field(None, alias="start_time__gte")
+    start_time__lte: Optional[datetime] = Field(None, alias="start_time__lte")
 
 @router.post("/meeting/list", response=List[MeetingSchemaOut])
 @paginate(MyPagination)
@@ -272,14 +278,58 @@ def list_meeting(request, filters: MeetingFilters):
 class MeetingDeleteSchemaIn(Schema):
     """删除会议Schema"""
     meetingid: int = Field(..., description="会议ID")
+    delete_type: int = Field(1, description="删除类型：1=软删除(回收站)，2=硬删除(彻底删除)")
+    reason: str = Field(None, description="删除原因")
 
 @router.post("/meeting/delete")
 @require_meeting_permission('owner')
 def delete_meeting(request, data: MeetingDeleteSchemaIn):
     """删除会议（需要编辑权限）"""
-    delete(data.meetingid, Meeting)
+    try:
+        meeting = Meeting.objects.get(id=data.meetingid, delete_status=0)
+    except Meeting.DoesNotExist:
+        raise MeetError("会议不存在或已被删除", BusinessCode.INSTANCE_NOT_FOUND.value)
+    
+    if data.delete_type == 1:
+        # 软删除：放入回收站
+        meeting.soft_delete(reason=data.reason)
+    elif data.delete_type == 2:
+        # 硬删除：标记为彻底删除
+        meeting.hard_delete(reason=data.reason)
+    else:
+        raise MeetError("无效的删除类型", BusinessCode.PARAMETER_ERROR.value)
+    
     return MeetResponse(errcode=BusinessCode.OK)
 
+@router.get("/meeting/trash", response=List[MeetingSchemaOut])
+@paginate(MyPagination)
+def list_trash_meetings(request):
+    """获取回收站会议列表 - 只返回当前用户拥有的软删除会议"""
+    
+    # 先应用数据权限过滤，再过滤软删除状态
+    qs = retrieve(request, Meeting).values().all()
+    qs = qs.filter(delete_status=1)  # 只包含软删除的
+    
+    # 确保只返回当前用户拥有的会议
+    user_info = get_user_info_from_token(request)
+    user_obj = get_object_or_404(User, id=user_info['id'])
+    if not user_info['is_superuser']:
+        qs = qs.filter(owner=user_obj)
+    
+    qs = qs.order_by('-deleted_datetime')  # 按删除时间倒序
+    return qs
+
+@router.post("/meeting/restore", response=MeetingSchemaOut)
+@require_meeting_permission('owner')
+def restore_meeting(request, data: MeetingDeleteSchemaIn):
+    """恢复会议"""
+    try:
+        meeting = Meeting.objects.get(id=data.meetingid, delete_status=1)
+        meeting.restore()
+    except Meeting.DoesNotExist:
+        raise MeetError("会议不存在或不在回收站中", BusinessCode.INSTANCE_NOT_FOUND.value)
+    
+    return MeetResponse(errcode=BusinessCode.OK)
 
 class EnumItemSchema(Schema):
     value: str | int
@@ -291,6 +341,8 @@ ENUM_REGISTRY: Dict[str, list[tuple[Any, Any]]] = {
     "meeting-statuses": Meeting.STATUS_CHOICES,
     "meeting-report-statuses": MeetingSummary.GENERATE_STATUS_CHOICES,
     "photo-types": MeetingPhoto.PHOTO_TYPE_CHOICES,
+    "sex-types": User.GENDER_CHOICES,
+    "delete-types": Meeting.DELETE_STATUS_CHOICES
 }
 
 @router.get("/enums/{enum_name}", response=List[EnumItemSchema])
@@ -313,7 +365,7 @@ def get_all_enums(request):
     data = {}
     for key, choices in ENUM_REGISTRY.items():
         data[key] = [{"value": c[0], "label": c[1]} for c in choices]
-    return {"data": data}
+    return {"items": data}
 
 # ========== 会议分享 ==========
 
@@ -546,6 +598,15 @@ class SummarySchemaOut(ModelSchema):
         model = MeetingSummary
         model_exclude = ['id', 'meeting']
 
+    @computed_field(description="会议报告文件")
+    def generate_status_text(self) -> str:
+        if self.generate_status is not None:
+            # 从 PROCESS_STATUS_CHOICES 中获取对应的显示文本
+            for status_value, status_display in MeetingSummary.GENERATE_STATUS_CHOICES:
+                if status_value == self.generate_status:
+                    return status_display
+        return None
+
 @router.get("/meeting/summary/get", response=SummarySchemaOut)
 def get_meeting_summary(request, meetingid: int=Query(...)):
     """获取指定会议的纲要、会议报告文件"""
@@ -698,7 +759,7 @@ def add_participant(request, data: ParticipantSchemaIn):
 
 class ParticipantDeleteSchemaIn(Schema):
     """移除参与人Schema"""
-    meetingid: int = Field(..., description="关联会议ID")
+    # meetingid: int = Field(..., description="关联会议ID")
     participantid: int = Field(..., description="参会人员ID")
 
 @require_meeting_permission('edit')
@@ -706,8 +767,8 @@ class ParticipantDeleteSchemaIn(Schema):
 def remove_participant(request, data: ParticipantDeleteSchemaIn):
     """移除参会人员（需要编辑权限）"""
     participant = get_object_or_404(MeetingParticipant, 
-                                   id=data.participantid, 
-                                   meeting_id=data.meetingid)
+                                   id=data.participantid
+                                   )
     participant.delete()
     return MeetResponse(errcode=BusinessCode.OK)
 

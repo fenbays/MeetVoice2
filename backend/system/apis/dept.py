@@ -3,6 +3,7 @@ from typing import List
 from django.shortcuts import get_object_or_404
 from ninja import Field, ModelSchema, Query, Router, Schema
 from ninja.pagination import paginate
+from utils.meet_auth import data_permission
 from system.models import Dept
 from utils.meet_crud import create, delete, retrieve, update
 from utils.meet_ninja import MeetFilters, MyPagination
@@ -32,37 +33,26 @@ class SchemaOut(ModelSchema):
         model = Dept
         model_exclude = ['id']
 
+class DeptFilters(MeetFilters):
+    deptid: int = Field(None, alias="deptid")
 
-# @router.post("/dept", response=SchemaOut)
-# def create_dept(request, data: SchemaIn):
-#     dept = create(request, data, Dept)
-#     return dept
-
-
-# @router.delete("/dept/{dept_id}")
-# def delete_dept(request, dept_id: int):
-#     delete(dept_id, Dept)
-#     return {"success": True}
-
-
-# @router.put("/dept/{dept_id}", response=SchemaOut)
-# def update_dept(request, dept_id: int, data: SchemaIn):
-#     dept = update(request, dept_id, data, Dept)
-#     return dept
-
-
-@router.get("/dept", response=List[SchemaOut])
+@router.get("/dept/list", response=List[SchemaOut])
 @paginate(MyPagination)
-def list_dept(request, filters: Filters = Query(...)):
+def list_dept(request, filters: DeptFilters = Query(...)):
     """
     分页获取部门列表（前台用户应当可以查到所有部门）
     """
-    qs = retrieve(request, Dept, filters)
+    filters = data_permission(request, filters)
+    if filters.deptid is not None:
+        qs = Dept.objects.filter(id=filters.deptid)
+    else:
+        qs = Dept.objects.all()
+    qs = qs.order_by('create_datetime')
     return qs
 
 
-@router.get("/dept/{dept_id}", response=SchemaOut)
-def get_dept(request, dept_id: int):
+@router.get("/dept/get", response=SchemaOut)
+def get_dept(request, dept_id: int = Query(...)):
     """
     获取部门详情
     """

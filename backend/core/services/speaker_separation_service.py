@@ -1,6 +1,7 @@
 import os
 import ffmpeg
 import time
+import torch
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple, Any, Callable
 from pydub import AudioSegment
@@ -13,7 +14,6 @@ class SpeakerSeparationService:
     """说话人分离服务"""
     
     def __init__(self, model_manager: ModelManager):
-        import torch
         self.model_manager = model_manager
         self.model = None
         self.device = "cuda" if torch.cuda.is_available() else "cpu"

@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 import traceback
 
 import mimetypes
@@ -216,6 +216,7 @@ def create_recording(request, meetingid: int=Query(...)):
         raise MeetError('服务器错误，上传失败', BusinessCode.SERVER_ERROR.value)
 
 @router.post("/recording/update", response=RecordingSchemaOut)
+@require_meeting_owner
 @require_recording_owner
 def update_recording(request, data: RecordingUpdateSchemaIn):
     """
@@ -698,13 +699,6 @@ def get_speaker(request, speakerid: int = Query(...)):
 
 
 # ============= Segment 转录片段相关接口 =============
-
-class SegmentFilters(MeetFilters):
-    recordingid: int = Field(None, alias="recordingid")
-    speakerid: int = Field(None, alias="speakerid")
-    text: str = Field(None)
-
-
 class SegmentSchemaIn(ModelSchema):
     id: int = Field(..., description="转录片段ID", alias="segmentid")
     
@@ -728,6 +722,11 @@ class SegmentSchemaOut(ModelSchema):
         recordingid = Recording.objects.get(id=self.recording).id if self.recording else None
         return recordingid
 
+class SegmentFilters(MeetFilters):
+    recordingid: int = Field(None, alias="recordingid")
+    speakerid: int = Field(None, alias="speakerid")
+    text: Optional[str] = Field(None)
+
 @router.post("/segment/list", response=List[SegmentSchemaOut])
 @paginate(MyPagination)
 @require_meeting_permission('view')
@@ -745,7 +744,7 @@ def list_segment(request, filters: SegmentFilters):
     return queryset
 
 
-@router.post("/segment/get", response=SegmentSchemaOut)
+@router.get("/segment/get", response=SegmentSchemaOut)
 @require_meeting_permission('view')
 def get_transcript(request, segmentid: int=Query(...)):
     """获取转录片段详情"""
