@@ -36,6 +36,7 @@ class LoginSchema(Schema):
 class Out(Schema):
     userInfo: SchemaOut
     token: str
+    expires_in: int
 
 
 @router.post("/login", response=Out, auth=None)
@@ -62,7 +63,8 @@ def login(request, data: LoginSchema):
     token_manager.store_token(user_obj.id, token, device_id)
     data = {
         'userInfo': user_obj,
-        'token': token
+        'token': token,
+        'expires_in': TOKEN_LIFETIME
     }
     save_login_log(request=request)
     return data

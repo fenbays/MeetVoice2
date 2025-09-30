@@ -4,6 +4,7 @@ from meet.router import router as meet_router
 from utils.meet_auth import GlobalAuth
 from utils.meet_ninja import MeetNinjaAPI
 from utils.meet_response import BusinessCode, MeetResponse
+from ninja.errors import ValidationError
 
 api = MeetNinjaAPI(auth=GlobalAuth())
 
@@ -12,6 +13,14 @@ def handle_http404(request, exc):
     import traceback
     traceback.print_exc()
     return MeetResponse(errcode=BusinessCode.INSTANCE_NOT_FOUND, errmsg="找不到请求的资源")
+
+@api.exception_handler(ValidationError)
+def handle_validation_error(request, exc):
+    """处理参数验证错误"""
+    return MeetResponse(
+        errcode=BusinessCode.BUSINESS_ERROR, 
+        errmsg=f"参数验证失败: {str(exc)}"
+    )
 
 # 统一处理server异常
 @api.exception_handler(Exception)
