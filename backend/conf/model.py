@@ -4,13 +4,10 @@ from django.conf import settings
 
 class ModelConfig:
     def __init__(self):
-        # 获取项目根目录
         self.project_root = settings.BASE_DIR
         self.model_lib = os.path.join(self.project_root, "model_lib")
         
-        # 模型配置字典
         self.model_configs: Dict[str, dict] = {
-             # === 音频降噪模型 ===
             "frcrn-ans": {
                 "model_id": "iic/speech_frcrn_ans_cirm_16k",
                 "local_path": os.path.join(self.model_lib, "iic", "speech_frcrn_ans_cirm_16k"),
@@ -47,6 +44,7 @@ class ModelConfig:
                     "device": "cuda:0" if self._is_cuda_available() else "cpu",                    
                 },
                 "type": "streaming",
+                "version": "v2.0.4",
                 "streaming_config": {
                     "chunk_size": [0, 10, 5],  # [0, 10, 5] 600ms, [0, 8, 4] 480ms
                     "encoder_chunk_look_back": 4,

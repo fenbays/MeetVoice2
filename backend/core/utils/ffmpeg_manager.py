@@ -50,11 +50,18 @@ class FFmpegAudioManager:
         self._state_lock = asyncio.Lock()
 
     async def start(self) -> bool:
-        """启动FFmpeg进程 - 使用WhisperLiveKit的方式"""
+        """启动FFmpeg进程 - 幂等操作"""
         async with self._state_lock:
+            # 【Linus原则】：已经在运行就是成功，不是错误
+            if self.state == FFmpegState.RUNNING:
+                logger.info("FFmpeg already running, reusing existing process")
+                return True
+            
+            # 只有STOPPED状态才能启动
             if self.state != FFmpegState.STOPPED:
-                logger.warning(f"FFmpeg already running in state: {self.state}")
+                logger.error(f"Cannot start FFmpeg in state: {self.state}")
                 return False
+            
             self.state = FFmpegState.STARTING
 
         try:

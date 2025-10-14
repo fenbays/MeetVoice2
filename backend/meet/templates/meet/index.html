@@ -1056,6 +1056,10 @@
                     audioBitsPerSecond: 128000
                 });
 
+                // === 保存到全局供stopRecording使用 ===
+                window.mediaRecorder = recorder;
+                window.audioStream = stream;
+
                 recorder.ondataavailable = (e) => {
                     if (websocket && websocket.readyState === WebSocket.OPEN && e.data.size > 0) {
                         websocket.send(e.data);
@@ -1114,6 +1118,14 @@
                                 text: data.message || '模型加载完成',
                                 progress: 80
                             });
+                            // websocket.onmessage = originalOnMessage;
+                            // resolve();
+                            // break;
+                        case 'transcription_started':
+                            updateInitializationProgress({
+                                text: data.message || '模型加载完成',
+                                progress: 90
+                            });
                             websocket.onmessage = originalOnMessage;
                             resolve();
                             break;
@@ -1136,14 +1148,25 @@
                 setTimeout(() => {
                     websocket.onmessage = originalOnMessage;
                     reject(new Error('模型加载超时'));
-                }, 30000);
+                }, 300000);
             });
         }
 
         async function stopRecording() {
             console.log('开始停止录音流程...');
-            
             updateConnectionState(ConnectionState.STOPPING);
+    
+            // === 新增：停止MediaRecorder ===
+            if (window.mediaRecorder && window.mediaRecorder.state !== 'inactive') {
+                window.mediaRecorder.stop();
+                console.log('MediaRecorder已停止');
+            }
+            
+            // === 新增：停止音频流 ===
+            if (window.audioStream) {
+                window.audioStream.getTracks().forEach(track => track.stop());
+                console.log('音频流已停止');
+            }            
             
             if (websocket && websocket.readyState === WebSocket.OPEN) {
                 websocket.send(JSON.stringify({
@@ -1250,6 +1273,47 @@
 
             status.textContent = '转录完成';
             console.log('最终转录结果:', result);
+            
+            // === 新增：实际显示结果 ===
+            
+            // 1. 显示结果区域
+            results.style.display = 'block';
+            
+            // 2. 提取转录文本
+            let fullTranscription = result.transcription || '';
+            
+            // 如果 transcription 为空，从 speakers_info 中提取
+            if (!fullTranscription && result.speakers_info) {
+                const speakerTexts = [];
+                
+                // 遍历说话人信息
+                Object.keys(result.speakers_info).forEach(speakerId => {
+                    const speaker = result.speakers_info[speakerId];
+                    if (speaker.total_text) {
+                        speakerTexts.push(`说话人${parseInt(speakerId) + 1}: ${speaker.total_text}`);
+                    }
+                });
+                
+                fullTranscription = speakerTexts.join('\n\n');
+            }
+            
+            // 3. 更新结果内容
+            document.getElementById('speakersCount').textContent = result.speakers_count || 0;
+            document.getElementById('transcriptionText').textContent = fullTranscription || '无转录内容';
+            
+            // 4. 处理音频下载链接
+            if (result.audio_url) {
+                const audioDownload = document.getElementById('audioDownload');
+                audioDownload.href = result.audio_url;
+                audioDownload.style.display = 'inline-block';
+                document.getElementById('noAudio').style.display = 'none';
+            } else {
+                document.getElementById('audioDownload').style.display = 'none';
+                document.getElementById('noAudio').style.display = 'inline-block';
+            }
+            
+            // 5. 滚动到结果区域
+            results.scrollIntoView({ behavior: 'smooth' });
         }
 
         function showError(message) {

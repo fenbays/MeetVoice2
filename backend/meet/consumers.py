@@ -150,30 +150,22 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
         message_type = data.get('type')
         
         if message_type == 'start_transcription':
-            self.transcription_active = True
-            
-         # 启动AudioProcessor任务
-            try:
-                if not hasattr(self, 'audio_processor') or self.audio_processor is None:
-                    logger.error("AudioProcessor未初始化")
-                    await self.send_error("音频处理器未初始化")
-                    return
-                    
-                self.results_generator = await self.audio_processor.create_tasks()
-                # 启动结果处理任务
-                self.result_handler_task = asyncio.create_task(self._handle_results())
-            except Exception as e:
-                logger.error(f"启动音频处理失败: {e}")
-                await self.send_error("音频处理器启动失败")
-                return
-                
+            """
+            【Linus原则】：一个函数只做一件事
+            启动流程：
+            1. 发送"开始加载模型"消息
+            2. 异步加载模型 + 启动AudioProcessor
+            3. 发送"模型加载完成"消息
+            """
+            # 立即响应，告诉前端开始加载
             await self.send(text_data=json.dumps({
-                'type': 'transcription_started',
-                'session_id': self.session_id
+                'type': 'transcription_starting',
+                'session_id': self.session_id,
+                'message': '正在初始化音频处理系统...'
             }))
-
-            # 异步初始化模型和AudioProcessor任务
-            asyncio.create_task(self._initialize_streaming_models_and_start())
+            
+            # 异步执行初始化（只调用一次）
+            asyncio.create_task(self._initialize_and_start_processing())
         
         elif message_type == 'stop_transcription':
             await self._handle_stop_transcription()
@@ -187,8 +179,15 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
         else:
             await self.send_error(f"不支持的消息类型: {message_type}")
 
-    async def _initialize_streaming_models_and_start(self):
-        """异步初始化模型并启动处理任务"""
+    async def _initialize_and_start_processing(self):
+        """
+        初始化并启动音频处理 - 只调用一次
+        
+        【Linus原则】：
+        1. 消除重复调用create_tasks()
+        2. 简化流程：模型加载 -> 启动AudioProcessor -> 完成
+        3. 清晰的错误处理
+        """
         try:
             # 1. 发送模型加载开始消息
             await self.send(text_data=json.dumps({
@@ -197,44 +196,52 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
                 'message': '正在加载AI模型...'
             }))
             
-            # 2. 等待模型准备完成 
+            # 2. 等待模型准备完成
             logger.info("开始加载模型...")
-            
-            # 检查AudioProcessor是否有模型准备方法
-            if hasattr(self.audio_processor, 'prepare_models'):
-                success = await self.audio_processor.prepare_models()
+            if hasattr(self.audio_processor, 'prepare_streaming_models'):
+                success = await self.audio_processor.prepare_streaming_models()
                 if not success:
                     raise Exception("模型准备失败")
             else:
-                # 模拟模型加载时间
-                await asyncio.sleep(15)
+                # 模拟模型加载
+                await asyncio.sleep(2)
             
             logger.info("模型加载完成")
             
-            # 3. 启动AudioProcessor任务
+            # 3. 检查AudioProcessor
             if not hasattr(self, 'audio_processor') or self.audio_processor is None:
                 raise Exception("AudioProcessor未初始化")
-                
+            
+            # 4. 启动AudioProcessor（只调用一次）
+            logger.info("启动AudioProcessor...")
             self.results_generator = await self.audio_processor.create_tasks()
-            # 启动结果处理任务
+            
+            # 5. 启动结果处理任务
             self.result_handler_task = asyncio.create_task(self._handle_results())
             
-            # 4. 发送模型准备完成消息
+            # 6. 设置转录激活标志
+            self.transcription_active = True
+            
+            # 7. 发送完成消息
             await self.send(text_data=json.dumps({
-                'type': 'model_loading_completed',
+                'type': 'transcription_started',
                 'session_id': self.session_id,
-                'message': '模型加载完成，可以开始录音'
+                'message': '音频处理系统已就绪，可以开始录音'
             }))
             
-            logger.info("音频处理系统准备完成")
+            logger.info("音频处理系统启动完成")
             
         except Exception as e:
-            logger.error(f"模型初始化失败: {e}")
+            logger.error(f"初始化失败: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # 发送错误消息
             await self.send(text_data=json.dumps({
-                'type': 'model_loading_failed',
+                'type': 'transcription_failed',
                 'session_id': self.session_id,
                 'error': str(e),
-                'message': '模型加载失败，请重试'
+                'message': '初始化失败，请刷新页面重试'
             }))
 
     async def _handle_stop_transcription(self):
@@ -352,34 +359,31 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
 
 
     async def handle_audio_data(self, audio_bytes):
-        """处理音频数据 - 加强安全检查"""
-        logger.info(f"收到音频数据，大小: {len(audio_bytes)} 字节，转录状态: {self.transcription_active}")
+        """
+        处理音频数据
         
+        【Linus原则】：简单的防御性检查，不过度设计
+        """
         if not self.transcription_active:
-            # 如果转录未激活，直接忽略音频数据，不发送错误
-            logger.warning("转录未激活，忽略音频数据")
+            # 静默忽略（前端可能在停止后还发了几个包）
+            return
+        
+        if not hasattr(self, 'audio_processor') or self.audio_processor is None:
+            logger.warning("AudioProcessor不可用，忽略音频数据")
             return
         
         try:
-            # 1. 存储音频段用于最终合并
+            # 1. 存储音频段用于离线处理
             if hasattr(self, 'audio_segments'):
                 self.audio_segments.append(audio_bytes)
-                logger.info(f"音频段已存储，当前总数: {len(self.audio_segments)}")
-            else:
-                logger.error("audio_segments 属性不存在！")
             
-            # 2. 安全检查audio_processor
-            if not hasattr(self, 'audio_processor') or self.audio_processor is None:
-                logger.warning("AudioProcessor未初始化或已清理，忽略音频数据")
-                return
-                
-            # 3. 直接传递给AudioProcessor
+            # 2. 传递给AudioProcessor进行实时处理
             success = await self.audio_processor.process_audio(audio_bytes)
             if not success:
-                logger.error("音频处理失败")
+                logger.warning("音频处理返回失败，但继续接收数据")
                 
         except Exception as e:
-            logger.error(f"音频数据处理失败: {e}")
+            logger.error(f"音频数据处理异常: {e}")
             import traceback
             traceback.print_exc()
 

@@ -45,9 +45,13 @@ class AudioProcessor:
             channels=self.channels,
         )
         
-        # 状态管理
-        self.is_processing = False
-        self.is_stopping = False
+        # 状态管理 - 简化为3个状态
+        # IDLE: 初始化完成，未启动
+        # RUNNING: 正在处理音频
+        # STOPPED: 已停止，可以被清理
+        self._state = "IDLE"
+        self._state_lock = asyncio.Lock()
+        
         self.pcm_buffer = bytearray()
         self.temp_files = []
         
@@ -58,25 +62,48 @@ class AudioProcessor:
         self.watchdog_task = None
         self.all_tasks_for_cleanup = []
         
-        # 回调函数
-        self.on_transcription_callback: Optional[Callable[[dict], None]] = None
-        self.on_error_callback: Optional[Callable[[str], None]] = None
-        
-        # 设置FFmpeg错误回调
-        async def handle_ffmpeg_error(error_type: str):
-            logger.error(f"FFmpeg error: {error_type}")
-            if self.on_error_callback:
-                await self.on_error_callback(f"FFmpeg错误: {error_type}")
-        
-        self.ffmpeg_manager.on_error_callback = handle_ffmpeg_error
+        # 回调函数（支持sync和async）
+        self.on_transcription_callback: Optional[Callable] = None
+        self.on_error_callback: Optional[Callable] = None
 
     async def create_tasks(self) -> AsyncIterator[dict]:
-        """创建并启动所有处理任务 - 模仿WhisperLiveKit"""
-        logger.info("创建音频处理任务...")
-        self.all_tasks_for_cleanup = []
-        processing_tasks_for_watchdog = []
+        """
+        创建并启动所有处理任务 - 幂等操作
+        
+        【Linus原则】：
+        1. 已经RUNNING就返回现有的生成器，不创建新任务
+        2. 只有IDLE状态才能启动
+        3. STOPPED状态说明已经cleanup过，不能重用
+        """
+        async with self._state_lock:
+            if self._state == "RUNNING":
+                logger.info("AudioProcessor已在运行，复用现有任务")
+                # 返回现有的结果生成器
+                return self.results_formatter()
+            
+            if self._state == "STOPPED":
+                logger.error("AudioProcessor已停止，无法重新启动（需要创建新实例）")
+                async def error_generator():
+                    yield {
+                        "status": "error",
+                        "message": "处理器已停止，请刷新页面重试",
+                        "timestamp": time()
+                    }
+                return error_generator()
+            
+            # 只有IDLE状态才继续启动
+            if self._state != "IDLE":
+                logger.error(f"无效的状态转换: {self._state} -> RUNNING")
+                async def error_generator():
+                    yield {
+                        "status": "error",
+                        "message": "音频处理器状态异常",
+                        "timestamp": time()
+                    }
+                return error_generator()
         
         # 启动FFmpeg管理器
+        logger.info("启动FFmpeg管理器...")
         success = await self.ffmpeg_manager.start()
         if not success:
             logger.error("FFmpeg管理器启动失败")
@@ -88,36 +115,44 @@ class AudioProcessor:
                 }
             return error_generator()
         
-        self.is_processing = True
+        # 创建所有异步任务
+        logger.info("创建处理任务...")
+        self.all_tasks_for_cleanup = []
+        processing_tasks_for_watchdog = []
         
-        # 创建转录任务
         self.transcription_task = asyncio.create_task(self.transcription_processor())
         self.all_tasks_for_cleanup.append(self.transcription_task)
         processing_tasks_for_watchdog.append(self.transcription_task)
         
-        # 创建FFmpeg读取任务
         self.ffmpeg_reader_task = asyncio.create_task(self.ffmpeg_stdout_reader())
         self.all_tasks_for_cleanup.append(self.ffmpeg_reader_task)
         processing_tasks_for_watchdog.append(self.ffmpeg_reader_task)
         
-        # 创建监控任务
         self.watchdog_task = asyncio.create_task(self.watchdog(processing_tasks_for_watchdog))
         self.all_tasks_for_cleanup.append(self.watchdog_task)
         
-        logger.info("所有音频处理任务已创建")
+        # 状态转换 IDLE -> RUNNING
+        async with self._state_lock:
+            self._state = "RUNNING"
+        
+        logger.info("AudioProcessor已启动，状态: RUNNING")
         return self.results_formatter()
 
     async def process_audio(self, audio_bytes: bytes) -> bool:
-        """处理音频数据 - 加强错误处理"""
+        """处理音频数据 - 只在RUNNING状态接受数据"""
+        # 检查状态
+        async with self._state_lock:
+            current_state = self._state
+        
+        if current_state != "RUNNING":
+            logger.warning(f"AudioProcessor状态为{current_state}，拒绝音频数据")
+            return False
+        
+        # 空数据表示结束
         if not audio_bytes:
-            logger.info("收到空音频消息，开始停止序列")
-            self.is_stopping = True
+            logger.info("收到空音频消息，停止FFmpeg输入")
             await self.ffmpeg_manager.stop()
             return True
-
-        if self.is_stopping:
-            logger.warning("AudioProcessor正在停止，忽略音频数据")
-            return False
 
         # 健康检查
         if not await self.ffmpeg_manager.health_check():
@@ -147,12 +182,17 @@ class AudioProcessor:
         return success
 
     async def ffmpeg_stdout_reader(self):
-        """FFmpeg stdout读取器 - 模仿WhisperLiveKit实现"""
+        """FFmpeg stdout读取器 - 清晰的状态检查"""
         logger.info("开始FFmpeg stdout读取...")
         beg = time()
         
         try:
-            while self.is_processing and not self.is_stopping:
+            while True:
+                # 检查状态
+                async with self._state_lock:
+                    if self._state != "RUNNING":
+                        logger.info(f"状态变为{self._state}，停止读取FFmpeg输出")
+                        break
                 try:
                     # 检查FFmpeg状态
                     state = await self.ffmpeg_manager.get_state()
@@ -177,12 +217,9 @@ class AudioProcessor:
                     chunk = await self.ffmpeg_manager.read_data(buffer_size)
                     
                     if not chunk:
-                        if self.is_stopping:
-                            logger.info("FFmpeg stdout关闭，停止中")
-                            break
-                        else:
-                            await asyncio.sleep(0.1)
-                            continue
+                        # 无数据时短暂等待
+                        await asyncio.sleep(0.1)
+                        continue
                     
                     # 添加到PCM缓冲区
                     self.pcm_buffer.extend(chunk)
@@ -236,9 +273,12 @@ class AudioProcessor:
                         audio_array
                     )
                     
-                    # 调用回调
+                    # 调用回调（支持sync和async）
                     if result and self.on_transcription_callback:
-                        await self.on_transcription_callback(result)
+                        if asyncio.iscoroutinefunction(self.on_transcription_callback):
+                            await self.on_transcription_callback(result)
+                        else:
+                            self.on_transcription_callback(result)
                     
                     self.transcription_queue.task_done()
                     
@@ -256,7 +296,12 @@ class AudioProcessor:
         logger.info("启动任务监控...")
         
         try:
-            while self.is_processing and not self.is_stopping:
+            while True:
+                # 检查状态
+                async with self._state_lock:
+                    if self._state != "RUNNING":
+                        logger.info(f"状态变为{self._state}，停止监控")
+                        break
                 try:
                     # 检查任务状态
                     for task in tasks_to_monitor:
@@ -271,9 +316,12 @@ class AudioProcessor:
                     ffmpeg_state = await self.ffmpeg_manager.get_state()
                     if ffmpeg_state == FFmpegState.FAILED:
                         logger.error("FFmpeg处于失败状态")
-                    elif ffmpeg_state == FFmpegState.STOPPED and not self.is_stopping:
-                        logger.warning("FFmpeg意外停止，尝试重启")
-                        await self.ffmpeg_manager.restart()
+                    elif ffmpeg_state == FFmpegState.STOPPED:
+                        # FFmpeg意外停止，尝试重启
+                        async with self._state_lock:
+                            if self._state == "RUNNING":
+                                logger.warning("FFmpeg意外停止，尝试重启")
+                                await self.ffmpeg_manager.restart()
                     
                     await asyncio.sleep(5)  # 每5秒检查一次
                     
@@ -294,7 +342,14 @@ class AudioProcessor:
         logger.info("启动结果格式化器...")
         
         try:
-            while self.is_processing and not self.is_stopping:
+            while True:
+                # 检查状态
+                async with self._state_lock:
+                    current_state = self._state
+                
+                if current_state != "RUNNING":
+                    logger.info(f"状态变为{current_state}，停止结果格式化")
+                    break
                 try:
                     # 发送状态更新
                     yield {
@@ -320,11 +375,19 @@ class AudioProcessor:
             logger.info("结果格式化器结束")
 
     async def cleanup(self):
-        """清理资源 - 模仿WhisperLiveKit实现"""
-        logger.info("开始清理AudioProcessor资源...")
+        """
+        清理资源 - 幂等操作
         
-        self.is_processing = False
-        self.is_stopping = True
+        【Linus原则】：cleanup可以被多次调用，不会出错
+        """
+        async with self._state_lock:
+            if self._state == "STOPPED":
+                logger.info("AudioProcessor已经清理过，跳过")
+                return
+            
+            logger.info(f"开始清理AudioProcessor（当前状态: {self._state}）...")
+            # 状态转换 -> STOPPED
+            self._state = "STOPPED"
         
         # 取消所有任务
         for task in self.all_tasks_for_cleanup:
@@ -349,10 +412,10 @@ class AudioProcessor:
             except Exception as e:
                 logger.warning(f"清理临时文件失败: {e}")
         
-        logger.info("AudioProcessor清理完成")
+        logger.info("AudioProcessor清理完成，状态: STOPPED")
 
-    def convert_pcm_to_float(self, pcm_buffer: bytes) -> np.ndarray:
-        """将PCM缓冲区转换为标准化的NumPy数组"""
+    def convert_pcm_to_float(self, pcm_buffer) -> np.ndarray:
+        """将PCM缓冲区转换为标准化的NumPy数组（接受bytes或bytearray）"""
         audio_int16 = np.frombuffer(pcm_buffer, dtype=np.int16)
         return audio_int16.astype(np.float32) / 32768.0
 
@@ -759,29 +822,11 @@ class AudioProcessor:
             results['message'] = error_msg
             return results
     
-    def cleanup(self):
-        """清理资源和临时文件"""
-        print("🧹 清理资源...")
-        
-        # 清理临时文件
-        for temp_file in self.temp_files:
-            MediaProcessor.cleanup_temp_file(temp_file)
-        self.temp_files.clear()
-        
-        # 清理模型资源（如果需要）
-        try:
-            if hasattr(self.model_manager, 'cleanup'):
-                self.model_manager.cleanup()
-        except Exception as e:
-            print(f"⚠️ 模型清理失败: {e}")
-
-
     async def prepare_streaming_models(self) -> bool:
         """准备模型 - 异步加载"""
         try:
             logger.info("开始准备流式转录模型...")
             
-            # 如果有streaming_service，让它准备模型
             if hasattr(self, 'streaming_service') and self.streaming_service:
                 success = await asyncio.get_event_loop().run_in_executor(
                     None, 
