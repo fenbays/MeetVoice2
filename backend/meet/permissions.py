@@ -6,6 +6,7 @@ import json
 import inspect
 from functools import wraps
 from django.shortcuts import get_object_or_404
+from django.core.exceptions import ObjectDoesNotExist
 from meet.models import Meeting, MeetingPhoto, Recording, Segment, Speaker
 from system.models import Users
 from utils.usual import get_user_info_from_token
@@ -28,18 +29,26 @@ def _get_meeting_from_request(request, *args, **kwargs):
             if name in kwargs:
                 return name, kwargs[name]
             
-            # 2. 从请求体获取（仅POST/PUT/PATCH请求）
+            # 2. 从请求体获取
             if request.method in ['POST']:
                 try:
-                    if hasattr(request, 'body') and request.body:
-                        body = json.loads(request.body)
-                        if name in body:
-                            return name, body[name]
-                        # 支持id字段（用于更新操作）
-                        if name.endswith('id') and 'id' in body:
-                            return name, body['id']
-                except (json.JSONDecodeError, AttributeError):
-                    pass
+                    if not hasattr(request, 'body') or not request.body:
+                        raise MeetError("POST请求必须包含JSON格式的请求体", BusinessCode.BUSINESS_ERROR.value)
+                    
+                    body = json.loads(request.body)
+                    if not isinstance(body, dict):
+                        raise MeetError("请求体必须是JSON对象格式", BusinessCode.BUSINESS_ERROR.value)
+                    
+                    if name in body:
+                        return name, body[name]
+                    # 支持id字段（用于更新操作）
+                    if name.endswith('id') and 'id' in body:
+                        return name, body['id']
+                        
+                except json.JSONDecodeError:
+                    raise MeetError("请求体格式错误，必须是有效的JSON", BusinessCode.BUSINESS_ERROR.value)
+                except AttributeError:
+                    raise MeetError("请求体不可访问", BusinessCode.BUSINESS_ERROR.value)
             
             # 3. 从查询参数获取
             if hasattr(request, 'GET') and name in request.GET:
@@ -90,7 +99,7 @@ def _get_meeting_from_request(request, *args, **kwargs):
             kwargs['photo'] = photo
             return photo.meeting
             
-    except (Meeting.DoesNotExist, Recording.DoesNotExist, Speaker.DoesNotExist):
+    except ObjectDoesNotExist:
         raise MeetError("请求的资源不存在", BusinessCode.INSTANCE_NOT_FOUND.value)
 
 
