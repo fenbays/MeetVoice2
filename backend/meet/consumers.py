@@ -27,7 +27,7 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
         # 初始化状态和音频处理
         self.transcription_active = False
         self.meeting_id = None
-        self.audio_segments = []  # 存储音频段用于最终合并
+        # self.audio_segments = []  # 存储音频段用于最终合并        
         
         # 创建基于配置的临时目录
         from django.conf import settings
@@ -35,8 +35,12 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
         os.makedirs(temp_base, exist_ok=True)
         self.temp_dir = os.path.join(temp_base, self.session_id)
         os.makedirs(self.temp_dir, exist_ok=True)
+
+        # 音频临时文件路径和文件句柄
+        self.temp_audio_file = os.path.join(self.temp_dir, f'recording_{self.session_id}.webm')
+        self.audio_file_handle = None
         
-        # 初始化转录服务（移除原来的各种服务初始化）
+        # 初始化转录服务
         try:
             # 只初始化AudioProcessor，它内部管理所有服务
             self.audio_processor = AudioProcessor(
@@ -63,61 +67,34 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
         logger.info(f"转录会话 {self.session_id} 已连接")
     
     async def disconnect(self, close_code):
-        """断开连接"""
+        """断开连接：只清理WebSocket相关资源"""
         self.connected = False
-        logger.info(f"会话 {self.session_id} 断开连接: {close_code}")
+        logger.info(f"会话 {self.session_id} 断开连接")
+        
+        # 停止接收音频
         self.transcription_active = False
         
-        try:
-            # 1. 停止结果处理任务
-            if hasattr(self, 'result_handler_task') and not self.result_handler_task.done():
-                logger.info("取消结果处理任务")
-                self.result_handler_task.cancel()
-                try:
-                    await self.result_handler_task
-                except asyncio.CancelledError:
-                    pass
-                except Exception as e:
-                    logger.error(f"结果处理任务取消失败: {e}")
-            
-            # 2. 确保关闭结果生成器
-            if hasattr(self, 'results_generator'):
-                try:
-                    await self.results_generator.aclose()
-                except Exception as e:
-                    logger.error(f"关闭结果生成器失败: {e}")
-                
-            # 3. 安全清理AudioProcessor
-            if hasattr(self, 'audio_processor') and self.audio_processor is not None:
-                try:
-                    logger.info("断开连接时清理AudioProcessor")
-                    await self.audio_processor.cleanup()
-                except Exception as e:
-                    logger.error(f"AudioProcessor清理失败: {e}")
-                finally:
-                    self.audio_processor = None
-            
-            # 4. 清理其他资源
-            await self.cleanup_resources()
-            
-            # 5. 离开群组
-            await self.channel_layer.group_discard(
-                self.room_group_name,
-                self.channel_name
-            )
-            logger.info(f"转录会话 {self.session_id} 已断开: {close_code}")
-        
-        except Exception as e:
-            logger.error(f"断开连接时发生错误: {e}")
-            import traceback
-            traceback.print_exc()
+        # 关闭文件句柄（如果还开着）
+        if hasattr(self, 'audio_file_handle') and self.audio_file_handle:
             try:
-                await self.channel_layer.group_discard(
-                    self.room_group_name,
-                    self.channel_name
-                )
-            except Exception:
-                pass
+                self.audio_file_handle.close()
+            except Exception as e:
+                logger.error(f"关闭文件句柄失败: {e}")
+        
+        # 清理AudioProcessor
+        if hasattr(self, 'audio_processor') and self.audio_processor:
+            try:
+                await self.audio_processor.cleanup()
+            except Exception as e:
+                logger.error(f"AudioProcessor清理失败: {e}")
+        
+        # 离开群组
+        await self.channel_layer.group_discard(
+            self.room_group_name,
+            self.channel_name
+        )
+        
+        logger.info(f"会话 {self.session_id} 清理完成")
     
     async def receive(self, text_data=None, bytes_data=None):
         """接收消息处理"""
@@ -253,51 +230,41 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
             }))
 
     async def _handle_stop_transcription(self):
-        """处理停止转录请求"""
-        logger.info(f"开始停止转录会话 {self.session_id}")
+        """处理停止转录：立即停止接收，启动后台任务"""
+        logger.info(f"停止录音信号收到")
         
-        # 1. 立即停止接收新的音频数据
+        # 1. 立即停止接收新音频数据
         self.transcription_active = False
         
-        try:
-            # 2. 发送停止确认
-            await self.send(text_data=json.dumps({
-                'type': 'transcription_stopped',
-                'session_id': self.session_id,
-                'timestamp': datetime.datetime.now().isoformat()
-            }))
-            
-            # 3. 停止结果处理任务
-            if hasattr(self, 'result_handler_task') and not self.result_handler_task.done():
-                logger.info("取消结果处理任务")
-                self.result_handler_task.cancel()
-                try:
-                    await self.result_handler_task
-                except asyncio.CancelledError:
-                    pass
-                except Exception as e:
-                    logger.error(f"结果处理任务取消失败: {e}")
-                    
-            # 4. 检查音频段并启动离线处理
-            logger.info(f"检查音频段: hasattr(audio_segments)={hasattr(self, 'audio_segments')}, "                       
-                       f"segments数量={len(self.audio_segments) if hasattr(self, 'audio_segments') else 'N/A'}")
-            
-            if hasattr(self, 'audio_segments') and self.audio_segments:
-                logger.info(f"启动离线处理，共 {len(self.audio_segments)} 个音频段")
-                # 直接创建后台任务处理离线音频，避免嵌套调用
-                asyncio.create_task(self._process_offline_audio_with_cleanup())
-            else:
-                logger.info("没有音频段需要处理，直接清理资源")
-                await self._cleanup_audio_processor()
-                
-            logger.info(f"会话 {self.session_id} 停止转录处理完成")
-            
-        except Exception as e:
-            logger.error(f"停止转录处理失败: {e}")
-            import traceback
-            traceback.print_exc()
-            await self._cleanup_audio_processor()
-            await self.send_error(f"停止转录失败: {str(e)}")
+        # 2. 关闭音频文件句柄
+        if self.audio_file_handle:
+            self.audio_file_handle.close()
+            self.audio_file_handle = None
+        
+        # 3. 立即响应前端（用户可以离开）
+        await self.send(text_data=json.dumps({
+            'type': 'transcription_stopped',
+            'session_id': self.session_id,
+            'message': '录音已停止，正在后台处理...'
+        }))
+        
+        # 4. 验证文件存在
+        if not os.path.exists(self.temp_audio_file):
+            logger.error("录音文件不存在，无法处理")
+            return
+        
+        # 5. 启动后台异步任务（Celery）
+        from meet.tasks import process_recording_audio
+        task = process_recording_audio.delay(
+            session_id=self.session_id,
+            audio_file_path=self.temp_audio_file,
+            meeting_id=self.meeting_id
+        )
+        
+        logger.info(f"后台任务已启动: {task.id}，用户可以离开页面")
+        
+        # 6. 清理AudioProcessor（只清理实时转写资源）
+        await self._cleanup_audio_processor()
 
     async def _cleanup_audio_processor(self):
         """安全清理AudioProcessor"""
@@ -367,31 +334,23 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
 
 
     async def handle_audio_data(self, audio_bytes):
-        """
-        处理音频数据        
-        """
+        """接收音频数据并立即持久化"""
         if not self.transcription_active:
-            # 静默忽略（前端可能在停止后还发了几个包）
-            return
-        
-        if not hasattr(self, 'audio_processor') or self.audio_processor is None:
-            logger.warning("AudioProcessor不可用，忽略音频数据")
             return
         
         try:
-            # 1. 存储音频段用于离线处理
-            if hasattr(self, 'audio_segments'):
-                self.audio_segments.append(audio_bytes)
+            # 1. 实时写入磁盘
+            if self.audio_file_handle is None:
+                self.audio_file_handle = open(self.temp_audio_file, 'wb')
             
-            # 2. 传递给AudioProcessor进行实时处理
-            success = await self.audio_processor.process_audio(audio_bytes)
-            if not success:
-                logger.warning("音频处理返回失败，但继续接收数据")
+            self.audio_file_handle.write(audio_bytes)
+            
+            # 2. 同时传递给AudioProcessor进行实时转写
+            if hasattr(self, 'audio_processor') and self.audio_processor:
+                await self.audio_processor.process_audio(audio_bytes)
                 
         except Exception as e:
             logger.error(f"音频数据处理异常: {e}")
-            import traceback
-            traceback.print_exc()
 
     async def _handle_results(self):
         """处理AudioProcessor的结果流"""
@@ -607,37 +566,37 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
         except Exception as e:
             logger.error(f"资源清理失败: {e}")
     
-    async def start_transcription_session(self, meeting_id):
-        """开始转录会话"""
-        try:
-            # 验证会议存在
-            meeting = await self.get_meeting(meeting_id)
-            if not meeting:
-                await self.send_error("会议不存在")
-                return
+    # async def start_transcription_session(self, meeting_id):
+    #     """开始转录会话"""
+    #     try:
+    #         # 验证会议存在
+    #         meeting = await self.get_meeting(meeting_id)
+    #         if not meeting:
+    #             await self.send_error("会议不存在")
+    #             return
             
-            # 设置状态
-            self.transcription_active = True  # ← 设置状态
-            self.meeting_id = meeting_id
+    #         # 设置状态
+    #         self.transcription_active = True  # ← 设置状态
+    #         self.meeting_id = meeting_id
             
-            await self.send(text_data=json.dumps({
-                'type': 'transcription_started',
-                'session_id': self.session_id,
-                'meeting_id': meeting_id,
-                'meeting_title': meeting.title,
-                'timestamp': datetime.datetime.now().isoformat()
-            }))
+    #         await self.send(text_data=json.dumps({
+    #             'type': 'transcription_started',
+    #             'session_id': self.session_id,
+    #             'meeting_id': meeting_id,
+    #             'meeting_title': meeting.title,
+    #             'timestamp': datetime.datetime.now().isoformat()
+    #         }))
             
-            logger.info(f"会话 {self.session_id} 开始转录，会议ID: {meeting_id}")
+    #         logger.info(f"会话 {self.session_id} 开始转录，会议ID: {meeting_id}")
             
-        except Exception as e:
-            logger.error(f"启动转录会话失败: {e}")
-            await self.send_error(f"启动失败: {str(e)}")
+    #     except Exception as e:
+    #         logger.error(f"启动转录会话失败: {e}")
+    #         await self.send_error(f"启动失败: {str(e)}")
     
     async def stop_transcription_session(self):
         """停止转录会话"""
         self.transcription_active = False  # ← 清理状态
-        self.meeting_id = None
+        self.meeting_id = self.session_id
         
         await self.send(text_data=json.dumps({
             'type': 'transcription_stopped',

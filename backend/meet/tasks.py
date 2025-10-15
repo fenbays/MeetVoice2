@@ -2,9 +2,12 @@ import traceback
 from celery import shared_task
 from django.conf import settings
 from django.core.exceptions import ValidationError
+from django.db import transaction
 import markdown
 import os
 import logging
+
+from system.models import File
 from .models import Recording, Speaker, Segment, MeetingSummary, Meeting, MeetingPhoto
 from core.services.audio_processor import AudioProcessor
 from .models import MeetingSummary
@@ -12,6 +15,67 @@ import requests
 from openai import OpenAI
 
 logger = logging.getLogger(__name__)
+
+@shared_task(bind=True)
+def process_recording_audio(self, session_id: str, audio_file_path: str, meeting_id: int):
+    """
+    后台处理录音：合并音频 -> 创建Recording -> 说话人分离和转写
+    
+    这个任务完全独立于WebSocket连接
+    """
+    try:
+        logger.info(f"开始处理实时录音: session={session_id}, file={audio_file_path}, meeting_id={meeting_id}")
+        
+        # 1. 验证音频文件
+        if not os.path.exists(audio_file_path):
+            raise FileNotFoundError(f"音频文件不存在: {audio_file_path}")
+        
+        # 2. 获取Meeting对象
+        meeting = Meeting.objects.get(id=meeting_id)
+        
+        # 3. 创建File记录
+        with open(audio_file_path, 'rb') as f:
+            file_record = File.create_from_file(
+                f, 
+                name=f'recording_{session_id}.webm'
+            )
+        
+        # 4. 创建Recording记录
+        with transaction.atomic():
+            recording = Recording.objects.create(
+                meeting=meeting,
+                file=file_record,
+                name=f'实时录音 {session_id}',
+                uploader_id=meeting.creator_id,  # 或从其他地方获取
+                duration=None,
+                process_status=0  # 待处理
+            )
+            
+            # 设置会议状态为进行中
+            if meeting.status != 1:
+                meeting.status = 1
+                meeting.save(update_fields=['status'])
+        
+        logger.info(f"Recording创建成功: {recording.id}")
+        
+        # 5. 调用现有的处理任务（就像upload一样）
+        from meet.tasks import process_uploaded_audio
+        process_uploaded_audio.delay(recording.id)
+        
+        # 6. 清理临时文件
+        try:
+            os.remove(audio_file_path)
+        except Exception as e:
+            logger.warning(f"清理临时文件失败: {e}")
+        
+        logger.info(f"录音处理完成: recording_id={recording.id}")
+        return {'success': True, 'recording_id': recording.id}
+        
+    except Exception as e:
+        logger.error(f"录音处理失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return {'success': False, 'error': str(e)}
 
 @shared_task(bind=True)
 def process_uploaded_audio(self, recording_id):
