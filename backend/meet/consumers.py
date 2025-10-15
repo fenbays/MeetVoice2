@@ -151,7 +151,6 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
         
         if message_type == 'start_transcription':
             """
-            【Linus原则】：一个函数只做一件事
             启动流程：
             1. 发送"开始加载模型"消息
             2. 异步加载模型 + 启动AudioProcessor
@@ -181,30 +180,38 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
 
     async def _initialize_and_start_processing(self):
         """
-        初始化并启动音频处理 - 只调用一次
-        
-        【Linus原则】：
-        1. 消除重复调用create_tasks()
-        2. 简化流程：模型加载 -> 启动AudioProcessor -> 完成
-        3. 清晰的错误处理
+        初始化并启动音频处理
         """
         try:
-            # 1. 发送模型加载开始消息
+            # 1. 通知：模型正在准备
             await self.send(text_data=json.dumps({
-                'type': 'model_loading_started',
+                'type': 'model_loading_progress',
                 'session_id': self.session_id,
+                'stage': 'model_loading_started',
                 'message': '正在加载AI模型...'
             }))
-            
-            # 2. 等待模型准备完成
+
+             # 2. 定义进度回调
+            async def progress_callback(stage: str, message: str):
+                """模型加载进度回调"""
+                await self.send(text_data=json.dumps({
+                    'type': 'model_loading_progress',
+                    'session_id': self.session_id,
+                    'stage': stage,
+                    'message': message
+                }))
+
+            # 3. 带回调地加载模型
             logger.info("开始加载模型...")
             if hasattr(self.audio_processor, 'prepare_streaming_models'):
-                success = await self.audio_processor.prepare_streaming_models()
+                success = await self.audio_processor.prepare_streaming_models(
+                    progress_callback=progress_callback
+                )
                 if not success:
                     raise Exception("模型准备失败")
             else:
-                # 模拟模型加载
-                await asyncio.sleep(2)
+                # 如果没有这个方法，直接失败别模拟
+                raise Exception("AudioProcessor 不支持流式模型")
             
             logger.info("模型加载完成")
             
@@ -224,8 +231,9 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
             
             # 7. 发送完成消息
             await self.send(text_data=json.dumps({
-                'type': 'transcription_started',
+                'type': 'model_loading_progress',
                 'session_id': self.session_id,
+                'stage': 'transcription_started',
                 'message': '音频处理系统已就绪，可以开始录音'
             }))
             
@@ -238,10 +246,10 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
             
             # 发送错误消息
             await self.send(text_data=json.dumps({
-                'type': 'transcription_failed',
+                'type': 'model_loading_progress',
                 'session_id': self.session_id,
-                'error': str(e),
-                'message': '初始化失败，请刷新页面重试'
+                'stage': 'transcription_failed',
+                'message': f'初始化失败，请刷新页面重试: {str(e)}'
             }))
 
     async def _handle_stop_transcription(self):
@@ -360,9 +368,7 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
 
     async def handle_audio_data(self, audio_bytes):
         """
-        处理音频数据
-        
-        【Linus原则】：简单的防御性检查，不过度设计
+        处理音频数据        
         """
         if not self.transcription_active:
             # 静默忽略（前端可能在停止后还发了几个包）

@@ -3,7 +3,7 @@ import asyncio
 import logging
 import numpy as np
 from time import time
-from typing import AsyncIterator, List, Dict, Optional, Callable
+from typing import AsyncIterator, Awaitable, List, Dict, Optional, Callable
 from core.utils.ffmpeg_manager import FFmpegAudioManager, FFmpegState
 from conf.model import ModelConfig
 from core.services.denoising_service import DenoisingService
@@ -822,12 +822,23 @@ class AudioProcessor:
             results['message'] = error_msg
             return results
     
-    async def prepare_streaming_models(self) -> bool:
-        """准备模型 - 异步加载"""
+    async def prepare_streaming_models(
+        self, 
+        progress_callback: Optional[Callable[[str, str], Awaitable[None]]] = None
+    ) -> bool:
+        """准备模型 - 异步加载，支持进度回调"""
         try:
             logger.info("开始准备流式转录模型...")
             
+            # 报告：开始准备
+            if progress_callback:
+                await progress_callback("initializing_models", "正在初始化模型...")
+            
             if hasattr(self, 'streaming_service') and self.streaming_service:
+                # 报告：加载中
+                if progress_callback:
+                    await progress_callback("loading_models", "正在加载AI模型...")
+                
                 success = await asyncio.get_event_loop().run_in_executor(
                     None, 
                     self.streaming_service._prepare_streaming_model
@@ -836,8 +847,15 @@ class AudioProcessor:
                     logger.error("流式模型准备失败")
                     return False
             
-            # 模拟额外的准备时间
-            await asyncio.sleep(1)
+            # 报告：最终准备
+            if progress_callback:
+                await progress_callback("finalizing", "正在完成准备...")
+            
+            await asyncio.sleep(0.5)  # 给前端时间显示最后一个状态
+            
+            # 报告：完成
+            if progress_callback:
+                await progress_callback("ready", "模型准备完成")
             
             logger.info("模型准备完成")
             return True

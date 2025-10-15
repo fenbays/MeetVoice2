@@ -476,12 +476,12 @@
             <div class="overlay-content">
                 <div class="spinner"></div>
                 <div id="initializationStatus">正在初始化...</div>
-                <div id="initializationProgress">
+                <!-- <div id="initializationProgress">
                     <div class="progress-bar">
                         <div class="progress-fill" id="progressFill"></div>
                     </div>
                     <div class="progress-text" id="progressText">0%</div>
-                </div>
+                </div> -->
             </div>
         </div>
     </div>
@@ -539,12 +539,12 @@
         };
 
         // 初始化步骤枚举
-        const InitializationSteps = {
-            CONNECTING_WEBSOCKET: { text: '正在连接服务器...', progress: 30 },
-            LOADING_MODELS: { text: '正在加载AI模型...', progress: 60 },
-            INITIALIZING_AUDIO: { text: '正在初始化音频...', progress: 80 },
-            READY: { text: '准备就绪', progress: 100 }
-        };
+        // const InitializationSteps = {
+        //     CONNECTING_WEBSOCKET: { text: '正在连接服务器...', progress: 30 },
+        //     LOADING_MODELS: { text: '正在加载AI模型...', progress: 60 },
+        //     INITIALIZING_AUDIO: { text: '正在初始化音频...', progress: 80 },
+        //     READY: { text: '准备就绪', progress: 100 }
+        // };
 
         // 模式切换功能
         recordModeBtn.addEventListener('click', () => switchMode('record'));
@@ -877,7 +877,8 @@
         function showInitializationOverlay() {
             const overlay = document.getElementById('initializationOverlay');
             overlay.classList.remove('hidden');
-            updateInitializationProgress(InitializationSteps.CONNECTING_WEBSOCKET);
+            // updateInitializationProgress(InitializationSteps.CONNECTING_WEBSOCKET);
+            updateLoadingUI('connecting', '正在连接服务器...');
         }
 
         function hideInitializationOverlay() {
@@ -885,20 +886,30 @@
             overlay.classList.add('hidden');
         }
 
-        function updateInitializationProgress(step) {
+       // 根据 stage 更新UI
+        function updateLoadingUI(stage, message) {
             const statusEl = document.getElementById('initializationStatus');
-            const progressFill = document.getElementById('progressFill');
-            const progressText = document.getElementById('progressText');
             
-            statusEl.textContent = step.text;
-            progressFill.style.width = step.progress + '%';
-            progressText.textContent = step.progress + '%';
+            // stage 到用户友好文本的映射
+            const stageMessages = {
+                'connecting': '正在连接服务器...',
+                'model_loading_started': '正在准备AI模型...',
+                'initializing_models': '正在初始化模型...',
+                'loading_models': '正在加载AI模型...',
+                'finalizing': '正在完成准备...',
+                'ready': '模型准备完成',
+                'transcription_started': '音频处理系统已就绪',
+                'initializing_audio': '正在初始化音频设备...',
+                'transcription_failed': '初始化失败'
+            };
+            
+            // 使用后端提供的 message，如果没有则使用默认映射
+            statusEl.textContent = message || stageMessages[stage] || '处理中...';
         }
 
         async function setupWebSocket() {
             try {
-                updateInitializationProgress(InitializationSteps.CONNECTING_WEBSOCKET);
-                
+                updateLoadingUI('connecting', '正在连接服务器...');
                 const meetingId = '1';
                 const wsUrl = `ws://${window.location.host}/ws/transcribe/${meetingId}/`;
                 console.log('正在连接WebSocket:', wsUrl);
@@ -911,7 +922,7 @@
                     websocket.onopen = () => {
                         if (!resolved) {
                             resolved = true;
-                            updateInitializationProgress(InitializationSteps.LOADING_MODELS);
+                            // updateInitializationProgress(InitializationSteps.LOADING_MODELS);
                             console.log('WebSocket连接已建立');
                             resolve();
                         }
@@ -1007,10 +1018,12 @@
                 await setupWebSocket();
 
                 console.log('WebSocket连接成功，等待模型加载...');
-                updateInitializationProgress(InitializationSteps.LOADING_MODELS);
+                updateLoadingUI('loading_models', '正在加载AI模型...');
+                // updateInitializationProgress(InitializationSteps.LOADING_MODELS);
                 await waitForModelReady();
                 
-                updateInitializationProgress(InitializationSteps.INITIALIZING_AUDIO);
+                updateLoadingUI('initializing_audio', '正在初始化音频...');
+                // updateInitializationProgress(InitializationSteps.INITIALIZING_AUDIO);
                 console.log('WebSocket连接成功，开始初始化音频...');
                 
                 const stream = await navigator.mediaDevices.getUserMedia({
@@ -1022,7 +1035,8 @@
                     }
                 });
                 
-                updateInitializationProgress(InitializationSteps.READY);
+                // updateInitializationProgress(InitializationSteps.READY);
+                updateLoadingUI('ready', '音频设备准备就绪');
                 console.log('音频流获取成功');
 
                 audioContext = new (window.AudioContext || window.webkitAudioContext)({
@@ -1103,48 +1117,35 @@
                 
                 function handleModelMessages(event) {
                     const data = JSON.parse(event.data);
-                    console.log('等待模型时收到消息:', data.type);
+                    console.log('模型加载消息:', data);
                     
-                    switch(data.type) {
-                        case 'model_loading_started':
-                            updateInitializationProgress({
-                                text: data.message || '正在加载AI模型...',
-                                progress: 60
-                            });
-                            break;
-                            
-                        case 'model_loading_completed':
-                            updateInitializationProgress({
-                                text: data.message || '模型加载完成',
-                                progress: 80
-                            });
-                            // websocket.onmessage = originalOnMessage;
-                            // resolve();
-                            // break;
-                        case 'transcription_started':
-                            updateInitializationProgress({
-                                text: data.message || '模型加载完成',
-                                progress: 90
-                            });
+                    // 统一处理 model_loading_progress 消息
+                    if (data.type === 'model_loading_progress') {
+                        const stage = data.stage;
+                        const message = data.message;
+                        
+                        // 更新UI
+                        updateLoadingUI(stage, message);
+                        
+                        // 判断是否完成
+                        if (stage === 'transcription_started') {
                             websocket.onmessage = originalOnMessage;
                             resolve();
-                            break;
-                            
-                        case 'model_loading_failed':
+                        } else if (stage === 'transcription_failed') {
                             websocket.onmessage = originalOnMessage;
-                            reject(new Error(data.message || '模型加载失败'));
-                            break;
-                            
-                        default:
-                            if (originalOnMessage) {
-                                originalOnMessage(event);
-                            }
-                            break;
+                            reject(new Error(message || '模型加载失败'));
+                        }
+                    } else {
+                        // 其他消息交给原处理器
+                        if (originalOnMessage) {
+                            originalOnMessage(event);
+                        }
                     }
                 }
                 
                 websocket.onmessage = handleModelMessages;
                 
+                // 超时保护（5分钟）
                 setTimeout(() => {
                     websocket.onmessage = originalOnMessage;
                     reject(new Error('模型加载超时'));
