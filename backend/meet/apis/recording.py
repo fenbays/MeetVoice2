@@ -329,7 +329,8 @@ def get_processing_status(request, recordingid: int=Query(...)):
             'status_text': recording.get_process_status_display(),
             'file_name': recording.file.name if recording.file else None,
             'file_size': recording.file.size if recording.file else None,
-            'file_uuid': str(recording.file.uuid) if recording.file else None,  # 改为返回UUID
+            'file_uuid': str(recording.file.uuid.hex) if recording.file else None,  # 改为返回UUID
+            'file_ext': recording.file.name.split('.')[-1] if recording.file else None,
             'duration': recording.duration,
             'upload_time': recording.create_datetime,
             'uploader_name': recording.uploader.name if recording.uploader else None,

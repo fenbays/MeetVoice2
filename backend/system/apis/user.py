@@ -145,17 +145,17 @@ def repassword(request, data: PasswordSchemaIn):
     """
     try:
         if data.old_password == data.new_password:
-            return MeetResponse(errcode=BusinessCode.SERVER_ERROR, errmsg='新密码不能与原密码相同')
+            return MeetResponse(errcode=BusinessCode.BUSINESS_ERROR, errmsg='新密码不能与原密码相同')
         validate_password_complexity(data.new_password)
     except ValidationError as e:
-        return MeetResponse(errcode=BusinessCode.SERVER_ERROR, errmsg=str(e))
+        return MeetResponse(errcode=BusinessCode.BUSINESS_ERROR, errmsg=str(e))
 
     request_user = get_user_info_from_token(request)
     request_user_id = request_user['id']
     update_id = data.id
     if request_user_id == update_id:
         user = get_object_or_404(Users, id=update_id, is_active=True, is_superuser=False)
-        if not user.check_password(data.old_password) or data.old_password == data.new_password:
+        if not user.check_password(data.old_password):
             return MeetResponse(errcode=BusinessCode.PERMISSION_DENIED, errmsg='原密码错误')        
         user.set_password(data.new_password)
         user.save()

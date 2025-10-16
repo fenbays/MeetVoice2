@@ -58,7 +58,7 @@ def login(request, data: LoginSchema):
     time_now = int(datetime.now().timestamp())
     jwt = MeetJwt(SECRET_KEY, user_obj_dic, valid_to=time_now + TOKEN_LIFETIME)
     token = jwt.encode()
-    device_id = request.headers.get('X-Device-ID', 'web')
+    device_id = request.headers.get('X-Device-ID', f'web-{token[:16]}')
     token_manager = TokenManager()
     token_manager.store_token(user_obj.id, token, device_id)
     data = {

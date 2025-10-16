@@ -6,6 +6,8 @@ import traceback
 from django.shortcuts import get_object_or_404
 from django.db import IntegrityError, transaction
 from django.db.models import QuerySet
+from django.db.models import Case, When, Value, CharField
+from django.db.models import Q
 from django.contrib.auth import get_user_model
 from ninja import Field, ModelSchema, Query, Router, Schema
 from ninja.pagination import paginate
@@ -68,11 +70,31 @@ def get_user_meetings_queryset(user_obj)->QuerySet[Meeting]:
         meeting__delete_status=0
     ).values_list('meeting_id', flat=True)
     
-    # 合并所有会议ID
     all_meeting_ids = list(owned_meeting_ids) + list(shared_meeting_ids)
+
+    from django.db.models import Func, F
     
-    # 返回合并后的QuerySet，按创建时间倒序
-    return Meeting.objects.filter(id__in=all_meeting_ids, delete_status=0).order_by('-create_datetime')
+    # MySQL 的 GROUP_CONCAT
+    class GroupConcat(Func):
+        function = 'GROUP_CONCAT'
+        template = '%(function)s(DISTINCT %(expressions)s)'
+    
+    return Meeting.objects.filter(
+        id__in=all_meeting_ids, 
+        delete_status=0
+    ).annotate(
+        access_type=Case(
+            When(id__in=owned_meeting_ids, then=Value('owned')),
+            When(id__in=shared_meeting_ids, then=Value('shared')),
+            default=Value('owned'),
+            output_field=CharField()
+        ),
+        # MySQL 使用 GROUP_CONCAT，返回逗号分隔的ID字符串
+        shared_userid_str=GroupConcat(
+            'shares__shared_user_id',
+            filter=Q(shares__is_active=True)
+        )
+    ).order_by('-create_datetime')
 
 
 # ============= Meeting 相关接口 =============
@@ -85,6 +107,7 @@ class MeetingSchemaIn(ModelSchema):
 
 class MeetingSchemaOut(ModelSchema):
     meetingid: int = Field(..., alias="id")
+    access_type: str | None = None  # 访问类型字段：'owned' 或 'shared'
     class Config:
         model = Meeting
         model_exclude = ["id"]
@@ -97,6 +120,15 @@ class MeetingSchemaOut(ModelSchema):
                 if status_value == self.status:
                     return status_display
         return None
+
+    @computed_field(description="被分享的用户ID列表")
+    def shared_userid(self) -> List[int]:
+        """将 GROUP_CONCAT 的字符串转换为整数列表"""
+        shared_str = getattr(self, 'shared_userid_str', None)
+        if not shared_str:
+            return []
+        # 解析逗号分隔的字符串并转为整数列表
+        return [int(uid) for uid in shared_str.split(',') if uid]
 
 class UserSchemaOut(ModelSchema):
     userid: int = Field(..., alias="id")
@@ -243,6 +275,10 @@ class MeetingFilters(MeetFilters):
     status: Optional[int] = Field(None, alias="status")
     start_time__gte: Optional[datetime] = Field(None, alias="start_time__gte")
     start_time__lte: Optional[datetime] = Field(None, alias="start_time__lte")
+    create_datetime__gte: Optional[datetime] = Field(None, alias="create_time__gte")
+    create_datetime__lte: Optional[datetime] = Field(None, alias="create_time__lte")
+    access_type: Optional[str] = Field(None, alias="access_type")
+
 
 @router.post("/meeting/list", response=List[MeetingSchemaOut])
 @paginate(MyPagination)
@@ -558,7 +594,7 @@ def get_user_meetingid(request, userid: int=Query(...)):
                 shareid=None,  # owned会议没有shareid
                 meetingid=meeting.id,
                 userid=request_user_id,
-                is_active=True,  # owned会议总是active
+                is_active=True,
                 create_datetime=meeting.create_datetime,
                 meeting_type='owned'
             ).dict()

@@ -136,6 +136,22 @@ class SpeakerSeparationService:
         except Exception as e:
             print(f"❌ 音频预处理失败: {e}")
             raise e
+
+    def _get_audio_duration(self, audio_file: str) -> float:
+        """获取音频时长（秒）"""
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+                '-of', 'default=noprint_wrappers=1:nokey=1', audio_file],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            return float(result.stdout.strip())
+        except Exception as e:
+            print(f"获取音频时长失败: {e}")
+            return 0.0
     
     def separate_speakers(self, 
                          audio_file: str,
@@ -187,6 +203,7 @@ class SpeakerSeparationService:
                 return {
                     'success': False,
                     'message': '没有检测到语音内容',
+                    'audio_duration': 0.0,
                     'full_text': '',
                     'speakers': {},
                     'sentences': [],
@@ -238,6 +255,12 @@ class SpeakerSeparationService:
             print(f"📊 检测到 {len(speakers)} 个说话人")
             for spk_id, info in speakers.items():
                 print(f"   说话人 {spk_id}: {len(info['segments'])} 个片段")
+
+            try:
+                audio_duration = self._get_audio_duration(audio_file)
+            except Exception as e:
+                print(f"获取音频时长失败: {e}")
+                audio_duration = 0.0
             
             return {
                 'success': True,
@@ -246,7 +269,8 @@ class SpeakerSeparationService:
                 'speakers': speakers,
                 'sentences': sentences,
                 'processing_time': end_time - start_time,
-                'audio_file': audio_file
+                'audio_file': audio_file,
+                'audio_duration': audio_duration
             }
             
         except Exception as e:
@@ -257,6 +281,7 @@ class SpeakerSeparationService:
             return {
                 'success': False,
                 'message': error_msg,
+                'audio_duration': 0.0,
                 'full_text': '',
                 'speakers': {},
                 'sentences': [],

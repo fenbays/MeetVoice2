@@ -43,7 +43,7 @@ class MeetResponse(HttpResponse):
 
         errcode_value = errcode.value if hasattr(errcode, 'value') else errcode
         if isinstance(errcode_value, int):
-            http_status = 200 if errcode_value < 5000 else 500
+            http_status = 200 if errcode_value < 6000 else 500
         else:
             http_status = 500       
         
