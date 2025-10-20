@@ -75,9 +75,9 @@ def get_user_meetings_queryset(user_obj)->QuerySet[Meeting]:
     from django.db.models import Func, F
     
     # MySQL 的 GROUP_CONCAT
-    class GroupConcat(Func):
-        function = 'GROUP_CONCAT'
-        template = '%(function)s(DISTINCT %(expressions)s)'
+    # class GroupConcat(Func):
+    #     function = 'GROUP_CONCAT'
+    #     template = '%(function)s(DISTINCT %(expressions)s)'
     
     return Meeting.objects.filter(
         id__in=all_meeting_ids, 
@@ -89,11 +89,11 @@ def get_user_meetings_queryset(user_obj)->QuerySet[Meeting]:
             default=Value('owned'),
             output_field=CharField()
         ),
-        # MySQL 使用 GROUP_CONCAT，返回逗号分隔的ID字符串
-        shared_userid_str=GroupConcat(
-            'shares__shared_user_id',
-            filter=Q(shares__is_active=True)
-        )
+        # # MySQL 使用 GROUP_CONCAT，返回逗号分隔的ID字符串
+        # shared_userid_str=GroupConcat(
+        #     'shares__shared_user_id',
+        #     filter=Q(shares__is_active=True)
+        # )
     ).order_by('-create_datetime')
 
 
@@ -121,14 +121,27 @@ class MeetingSchemaOut(ModelSchema):
                     return status_display
         return None
 
-    @computed_field(description="被分享的用户ID列表")
+    @computed_field(description="共享用户ID列表")
     def shared_userid(self) -> List[int]:
-        """将 GROUP_CONCAT 的字符串转换为整数列表"""
-        shared_str = getattr(self, 'shared_userid_str', None)
-        if not shared_str:
+        
+        if not hasattr(self, 'shares'):
             return []
-        # 解析逗号分隔的字符串并转为整数列表
-        return [int(uid) for uid in shared_str.split(',') if uid]
+        try:
+            shares_list = self.shares
+            return [
+                share.shared_user_id
+                for share in shares_list.all() if getattr(share, 'is_active', False)
+            ]
+        except AttributeError:
+            # 如果 self.shares 已经是纯列表（比如某些非 Django ORM 的处理），则直接迭代
+            if isinstance(shares_list, (list, tuple)):
+                return [
+                    share.shared_user_id
+                    for share in shares_list if getattr(share, 'is_active', False)
+                ]
+            
+            # 如果以上都不匹配，返回空列表
+            return []
 
 class UserSchemaOut(ModelSchema):
     userid: int = Field(..., alias="id")
@@ -308,6 +321,11 @@ def list_meeting(request, filters: MeetingFilters):
         # 应用其他过滤条件
         if filter_dict:
             qs = qs.filter(**filter_dict)
+    
+    # 预先获取 MeetingShare 数据
+    qs = qs.prefetch_related('shares')
+
+    print(f"------->>>>qsqsqs: {qs}")
     
     return qs
 
