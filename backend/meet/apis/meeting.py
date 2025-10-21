@@ -72,9 +72,9 @@ def get_user_meetings_queryset(user_obj)->QuerySet[Meeting]:
     
     all_meeting_ids = list(owned_meeting_ids) + list(shared_meeting_ids)
 
-    from django.db.models import Func, F
+    # from django.db.models import Func, F
     
-    # MySQL 的 GROUP_CONCAT
+    # # MySQL 的 GROUP_CONCAT
     # class GroupConcat(Func):
     #     function = 'GROUP_CONCAT'
     #     template = '%(function)s(DISTINCT %(expressions)s)'
@@ -82,24 +82,130 @@ def get_user_meetings_queryset(user_obj)->QuerySet[Meeting]:
     return Meeting.objects.filter(
         id__in=all_meeting_ids, 
         delete_status=0
-    ).annotate(
-        access_type=Case(
-            When(id__in=owned_meeting_ids, then=Value('owned')),
-            When(id__in=shared_meeting_ids, then=Value('shared')),
-            default=Value('owned'),
-            output_field=CharField()
-        ),
-        # # MySQL 使用 GROUP_CONCAT，返回逗号分隔的ID字符串
-        # shared_userid_str=GroupConcat(
-        #     'shares__shared_user_id',
-        #     filter=Q(shares__is_active=True)
-        # )
     ).order_by('-create_datetime')
 
+# ============= MeetingSummary 会议纲要相关接口 =============
+
+class SummarySchemaIn(ModelSchema):
+    meetingid: int = Field(..., description="关联会议ID")
+    
+    class Config:
+        model = MeetingSummary
+        model_exclude = ['id', 'meeting']
+
+
+class SummarySchemaOut(ModelSchema):
+    summaryid: int = Field(..., description="纲要ID", alias="id")
+    class Config:
+        model = MeetingSummary
+        model_exclude = ['meeting']
+
+    @cached_property
+    def _file_obj(self):
+        return File.objects.filter(id=self.report_file).first() if self.report_file else None
+
+    @computed_field(description="会议报告文件")
+    def generate_status_text(self) -> str:
+        if self.generate_status is not None:
+            # 从 PROCESS_STATUS_CHOICES 中获取对应的显示文本
+            for status_value, status_display in MeetingSummary.GENERATE_STATUS_CHOICES:
+                if status_value == self.generate_status:
+                    return status_display
+        return None
+
+    @computed_field
+    def file_uuid(self) -> str:
+        return str(self._file_obj.uuid.hex) if self._file_obj else None
+
+    @computed_field
+    def file_url(self) -> str:
+        return self._file_obj.get_absolute_url() if self._file_obj else None
+
+    @computed_field
+    def file_name(self) -> str:
+        return self._file_obj.name if self._file_obj else None
+
+    @computed_field
+    def file_size(self) -> int:
+        return self._file_obj.size if self._file_obj else None
+
+    @computed_field
+    def file_ext(self) -> str:
+        return self._file_obj.name.split('.')[-1] if self._file_obj else None
+
+@router.get("/meeting/summary/get", response=SummarySchemaOut)
+def get_meeting_summary(request, meetingid: int=Query(...)):
+    """获取指定会议的纲要、会议报告文件"""
+    summary = get_object_or_404(MeetingSummary, meeting_id=meetingid)
+    return summary
+
+
+@router.get("/meeting/reportfile/generate", response=SummarySchemaOut)
+def generate_meeting_report(
+    request, 
+    meetingid: int = Query(...),
+    force: Optional[bool] = Query(
+        False, 
+        description="是否强制重新生成报告文件。如果为 True，将忽略当前状态直接生成。"
+    )
+):
+    """生成会议报告文件
+    生成前提：会议名称、发言人、参会人员、会议照片、会议签到表均已设置
+    """
+    summary = get_object_or_404(MeetingSummary, meeting_id=meetingid)
+    meeting = summary.meeting
+    
+    # 1. 检查必要信息是否完整
+    if not meeting.title:
+        raise MeetError("会议名称未设置", BusinessCode.BUSINESS_ERROR.value)
+        
+    # 检查主持人
+    moderator = meeting.get_moderator()
+    if not moderator:
+        raise MeetError("未设置会议主持人", BusinessCode.BUSINESS_ERROR.value)
+        
+    # 检查参会人员
+    participants = meeting.participants.all()
+    if not participants.exists():
+        raise MeetError("未添加参会人员", BusinessCode.BUSINESS_ERROR.value)
+        
+    # 检查会议照片
+    photos = meeting.photos.filter(photo_type=1)
+    if not photos.exists():
+        raise MeetError("未上传会议照片", BusinessCode.BUSINESS_ERROR.value)
+        
+    # 检查签到表
+    sign_in_sheets = meeting.photos.filter(photo_type=2)
+    if not sign_in_sheets.exists():
+        raise MeetError("未上传签到表", BusinessCode.BUSINESS_ERROR.value)
+    
+    # 检查当前状态 (0, '未生成'),(1, '生成中'),(2, '已生成'),(3, '生成失败'),
+    # 如果不是强制重新生成，并且状态为“生成中”或“已生成”，则直接返回。
+    if not force and summary.generate_status in [1, 2]:
+        return summary
+    
+    # 如果状态是“生成中” (1)，则不做额外处理，直接返回，避免重复启动任务，即使是 force=True 也应当如此。
+    # 因为 force=True 的目的是重新生成已生成的报告，而不是打断正在生成的任务。
+    if summary.generate_status == 1:
+        return summary
+        
+    # 更新状态为生成中
+    summary.generate_status = 1
+    summary.save()
+    
+    print(f"启动异步任务: {meetingid}")
+    try:
+        # 启动异步任务
+        generate_meeting_report_task.delay(meetingid)
+        return summary
+    except Exception as e:
+        print(f"启动异步任务失败: {e}")
+        return summary
 
 # ============= Meeting 相关接口 =============
 class MeetingSchemaIn(ModelSchema):
     id: Optional[int] = Field(None, alias="meetingid")
+    location_name: Optional[str] = Field(None, alias="location")
     class Config:
         model = Meeting
         model_fields = ['title','description','location_name','latitude','longitude','start_time','end_time','keywords','status']
@@ -107,10 +213,82 @@ class MeetingSchemaIn(ModelSchema):
 
 class MeetingSchemaOut(ModelSchema):
     meetingid: int = Field(..., alias="id")
-    access_type: str | None = None  # 访问类型字段：'owned' 或 'shared'
+    # access_type: str | None = None  # 会议访问类型：'owned' 或 'shared'
+    _shared_user_ids: List[int] = []  # 内部字段存储提取的数据
+
     class Config:
         model = Meeting
         model_exclude = ["id"]
+
+    @model_validator(mode='before')
+    @classmethod
+    def extract_shares_data(cls, data):
+        """在 Pydantic 处理之前提取 Django ORM 的关系数据"""
+        
+        try:
+            shares_list = data.shares if hasattr(data, 'shares') else []
+            
+            # 提取会议的共享用户ID列表
+            shared_ids = [
+                share.shared_user_id 
+                for share in shares_list
+                if getattr(share, 'is_active', False)
+            ]            
+            
+            # 将数据临时存储到一个类变量，使用 data 的 id 作为键
+            if not hasattr(cls, '_temp_shared_ids'):
+                cls._temp_shared_ids = {}
+            
+            meeting_id = getattr(data, 'id', None)
+            if meeting_id:
+                cls._temp_shared_ids[meeting_id] = shared_ids
+
+            # 提取会议照片数据（按create_datetime排序）
+            if not hasattr(cls, '_temp_photos'):
+                cls._temp_photos = {}
+            
+            photos_list = data.photos if hasattr(data, 'photos') else []
+            photos_data = []
+            for photo in photos_list:
+                file_obj = photo.file if hasattr(photo, 'file') else None
+                photos_data.append({
+                    'photoid': photo.id,
+                    'photo_type': photo.photo_type,
+                    'photo_type_display': photo.get_photo_type_display(),
+                    'description': photo.description,
+                    'file_uuid': str(file_obj.uuid) if file_obj else None,
+                    'file_url': file_obj.get_absolute_url() if file_obj else None,
+                    'file_name': file_obj.name if file_obj else None,
+                    'file_ext': file_obj.name.split('.')[-1] if file_obj else None,
+                    'file_size': file_obj.size if file_obj else None,
+                    'create_datetime': photo.create_datetime,
+                })
+            cls._temp_photos[meeting_id] = photos_data
+            
+            # 提取会议报告文件信息
+            if not hasattr(cls, '_temp_report_file'):
+                cls._temp_report_file = {}
+
+            summary = data.summary if hasattr(data, 'summary') else None
+            report_file_data = None
+            if summary and hasattr(summary, 'report_file') and summary.report_file:
+                report_file = summary.report_file
+                report_file_data = {
+                    'file_uuid': str(report_file.uuid.hex) if report_file.uuid else None,
+                    'file_url': report_file.get_absolute_url() if report_file else None,
+                    'file_name': report_file.name if report_file else None,
+                    'file_ext': report_file.name.split('.')[-1] if report_file else None,
+                    'file_size': report_file.size if report_file else None,
+                    'create_datetime': report_file.create_datetime if hasattr(report_file, 'create_datetime') else None,
+                }
+            cls._temp_report_file[meeting_id] = report_file_data                
+                
+        except Exception as e:
+            import traceback
+            print(f"MeetingSchemaOut.extract_shares_data() 提取出错: {e}")
+            print(traceback.format_exc())
+        
+        return data
 
     @computed_field(description="会议状态")
     def status_text(self) -> str | None:
@@ -121,27 +299,51 @@ class MeetingSchemaOut(ModelSchema):
                     return status_display
         return None
 
+    @computed_field(description="会议访问类型")
+    def access_type(self) -> str:
+        """计算会议访问类型：'owned' 或 'shared'"""
+        from utils.usual import get_user_info_from_token
+        from django.contrib.auth import get_user_model
+        
+        from utils.models import get_current_user
+        current_user = get_current_user()
+        
+        if not current_user:
+            return 'owned'  # 默认值
+        
+        if hasattr(self, 'owner') and self.owner and self.owner == current_user.get('id', None):
+            return 'owned'
+        
+        # 检查是否是被分享的会议
+        # 通过 _temp_shared_ids 检查当前用户是否在共享列表中
+        temp_ids = getattr(self.__class__, '_temp_shared_ids', {})
+        shared_user_ids = temp_ids.get(self.meetingid, [])
+        
+        if current_user.get('id', None) in shared_user_ids:
+            return 'shared'
+        
+        # 默认返回 owned
+        return 'owned'
+
     @computed_field(description="共享用户ID列表")
     def shared_userid(self) -> List[int]:
-        
-        if not hasattr(self, 'shares'):
-            return []
-        try:
-            shares_list = self.shares
-            return [
-                share.shared_user_id
-                for share in shares_list.all() if getattr(share, 'is_active', False)
-            ]
-        except AttributeError:
-            # 如果 self.shares 已经是纯列表（比如某些非 Django ORM 的处理），则直接迭代
-            if isinstance(shares_list, (list, tuple)):
-                return [
-                    share.shared_user_id
-                    for share in shares_list if getattr(share, 'is_active', False)
-                ]
-            
-            # 如果以上都不匹配，返回空列表
-            return []
+        """返回共享用户ID列表"""
+        # 从类变量中获取
+        temp_ids = getattr(self.__class__, '_temp_shared_ids', {})
+        result = temp_ids.get(self.meetingid, [])
+        return result
+
+    @computed_field(description="会议照片列表（按上传时间排序）")
+    def photos(self) -> List[dict]:
+        """返回会议照片列表"""
+        temp_photos = getattr(self.__class__, '_temp_photos', {})
+        return temp_photos.get(self.meetingid, [])
+    
+    @computed_field(description="会议报告文件信息")
+    def report_file(self) -> dict | None:
+        """返回会议报告文件信息"""
+        temp_report = getattr(self.__class__, '_temp_report_file', {})
+        return temp_report.get(self.meetingid, {})
 
 class UserSchemaOut(ModelSchema):
     userid: int = Field(..., alias="id")
@@ -213,6 +415,32 @@ class MeetingDetailSchemaOut(ModelSchema):
                     return status_display
         return None
 
+    @computed_field(description="会议访问类型")
+    def access_type(self) -> str:
+        """计算会议访问类型：'owned' 或 'shared'"""
+        from utils.usual import get_user_info_from_token
+        from django.contrib.auth import get_user_model
+        
+        from utils.models import get_current_user
+        current_user = get_current_user()
+        
+        if not current_user:
+            return 'owned'  # 默认值
+        
+        if hasattr(self, 'owner') and self.owner and self.owner == current_user.get('id', None):
+            return 'owned'
+        
+        # 检查是否是被分享的会议
+        # 通过 _temp_shared_ids 检查当前用户是否在共享列表中
+        temp_ids = getattr(self.__class__, '_temp_shared_ids', {})
+        shared_user_ids = temp_ids.get(self.meetingid, [])
+        
+        if current_user.get('id', None) in shared_user_ids:
+            return 'shared'
+        
+        # 默认返回 owned
+        return 'owned'
+
 @router.post("/meeting/create", response=MeetingSchemaOut)
 @anti_duplicate(expire_time=10)
 def create_meeting(request, data: MeetingSchemaIn):
@@ -238,7 +466,8 @@ def get_meeting(request, meetingid: int=Query(...)):
     Meeting.objects.select_related('owner').prefetch_related(
             'participants',
             'photos__file', 
-            'recordings__speakers'
+            'recordings__speakers',
+            'summary__report_file'
         ), 
         id=meetingid,
         delete_status=0
@@ -257,7 +486,6 @@ def get_meeting(request, meetingid: int=Query(...)):
     all_speakers = []
     for recording in meeting.recordings.all():
         all_speakers.extend(recording.speakers.all())
-    
     # 构建返回数据
     meeting_dict = meeting.__dict__.copy()
     meeting_dict.update({
@@ -265,7 +493,7 @@ def get_meeting(request, meetingid: int=Query(...)):
         'photos': all_photos,
         'meeting_photos': meeting_photos,
         'signin_photos': signin_photos,
-        'speakers': all_speakers,
+        'speakers': all_speakers
     })
     
     return meeting_dict
@@ -300,33 +528,32 @@ def list_meeting(request, filters: MeetingFilters):
     request_user = get_user_info_from_token(request)
     user_obj = get_object_or_404(User, id=request_user['id'])
     
-    # 使用已有的函数获取用户可访问的会议
     qs = get_user_meetings_queryset(user_obj)
     
-    # 应用过滤器
     if filters is not None:
-        # 将filters中的空字符串值转换为None
         for attr, value in filters.__dict__.items():
             if getattr(filters, attr) == '':
                 setattr(filters, attr, None)
         
-        # 构建过滤条件字典
         filter_dict = filters.dict(exclude_none=True)
         
-        # 特殊处理 title 字段为模糊搜索
         if 'title' in filter_dict:
             title_value = filter_dict.pop('title')
             qs = qs.filter(title__icontains=title_value)
         
-        # 应用其他过滤条件
         if filter_dict:
             qs = qs.filter(**filter_dict)
     
     # 预先获取 MeetingShare 数据
-    qs = qs.prefetch_related('shares')
+    qs = qs.prefetch_related('shares')   
 
-    print(f"------->>>>qsqsqs: {qs}")
-    
+    # 预先获取会议照片数据（按create_datetime排序）
+    from django.db.models import Prefetch
+    qs = qs.prefetch_related(
+        Prefetch('photos', queryset=MeetingPhoto.objects.select_related('file').order_by('create_datetime'))
+    )    
+    # 预先获取会议报告数据
+    qs = qs.select_related('summary__report_file')
     return qs
 
 class MeetingDeleteSchemaIn(Schema):
@@ -634,85 +861,6 @@ def get_user_meetingid(request, userid: int=Query(...)):
     # 按创建时间倒序排序
     result.sort(key=lambda x: x['create_datetime'], reverse=True)
     return result
-
-
-# ============= MeetingSummary 会议纲要相关接口 =============
-
-class SummarySchemaIn(ModelSchema):
-    meetingid: int = Field(..., description="关联会议ID")
-    
-    class Config:
-        model = MeetingSummary
-        model_exclude = ['id', 'meeting']
-
-
-class SummarySchemaOut(ModelSchema):
-    summaryid: int = Field(..., description="纲要ID", alias="id")
-    class Config:
-        model = MeetingSummary
-        model_exclude = ['id', 'meeting']
-
-    @computed_field(description="会议报告文件")
-    def generate_status_text(self) -> str:
-        if self.generate_status is not None:
-            # 从 PROCESS_STATUS_CHOICES 中获取对应的显示文本
-            for status_value, status_display in MeetingSummary.GENERATE_STATUS_CHOICES:
-                if status_value == self.generate_status:
-                    return status_display
-        return None
-
-@router.get("/meeting/summary/get", response=SummarySchemaOut)
-def get_meeting_summary(request, meetingid: int=Query(...)):
-    """获取指定会议的纲要、会议报告文件"""
-    summary = get_object_or_404(MeetingSummary, meeting_id=meetingid)
-    return summary
-
-
-@router.get("/meeting/reportfile/generate", response=SummarySchemaOut)
-def generate_meeting_report(request, meetingid: int=Query(...)):
-    """生成会议报告文件
-    生成前提：会议名称、发言人、参会人员、会议照片、会议签到表均已设置
-    """
-    summary = get_object_or_404(MeetingSummary, meeting_id=meetingid)
-    meeting = summary.meeting
-    
-    # 1. 检查必要信息是否完整
-    if not meeting.title:
-        raise MeetError("会议名称未设置", BusinessCode.BUSINESS_ERROR.value)
-        
-    # 检查主持人
-    moderator = meeting.get_moderator()
-    if not moderator:
-        raise MeetError("未设置会议主持人", BusinessCode.BUSINESS_ERROR.value)
-        
-    # 检查参会人员
-    participants = meeting.participants.all()
-    if not participants.exists():
-        raise MeetError("未添加参会人员", BusinessCode.BUSINESS_ERROR.value)
-        
-    # 检查会议照片
-    photos = meeting.photos.filter(photo_type=1)
-    if not photos.exists():
-        raise MeetError("未上传会议照片", BusinessCode.BUSINESS_ERROR.value)
-        
-    # 检查签到表
-    sign_in_sheets = meeting.photos.filter(photo_type=2)
-    if not sign_in_sheets.exists():
-        raise MeetError("未上传签到表", BusinessCode.BUSINESS_ERROR.value)
-    
-    # 检查当前状态
-    if summary.generate_status == 1:
-        return summary
-        
-    # 更新状态为生成中
-    summary.generate_status = 1
-    summary.save()
-    
-    # 启动异步任务
-    generate_meeting_report_task.delay(meetingid)
-    
-    return summary
-
 
 # ============= MeetingParticipant 会议参与人相关接口 =============
 

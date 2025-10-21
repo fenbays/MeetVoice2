@@ -1,3 +1,4 @@
+from functools import cached_property
 from typing import List, Optional
 import traceback
 
@@ -133,6 +134,31 @@ class RecordingSchemaOut(ModelSchema):
     class Config:
         model = Recording
         model_exclude = ['id']
+
+
+    @cached_property
+    def _file_obj(self):
+        return File.objects.filter(id=self.file).first() if self.file else None
+
+    @computed_field(description="文件UUID")
+    def file_uuid(self) -> str:
+        return str(self._file_obj.uuid.hex) if self._file_obj else None
+
+    @computed_field(description="文件URL")
+    def file_url(self) -> str:
+        return self._file_obj.get_absolute_url() if self._file_obj else None
+
+    @computed_field(description="文件名称")
+    def file_name(self) -> str:
+        return self._file_obj.name if self._file_obj else None
+
+    @computed_field(description="文件大小")
+    def file_size(self) -> int:
+        return self._file_obj.size if self._file_obj else None
+    
+    @computed_field(description="文件扩展名")
+    def file_ext(self) -> str:
+        return self._file_obj.name.split('.')[-1] if self._file_obj else None
 
     @computed_field(description="处理状态")
     def status_text(self) -> str | None:
