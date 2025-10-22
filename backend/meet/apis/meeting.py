@@ -519,6 +519,7 @@ class MeetingFilters(MeetFilters):
     create_datetime__gte: Optional[datetime] = Field(None, alias="create_time__gte")
     create_datetime__lte: Optional[datetime] = Field(None, alias="create_time__lte")
     access_type: Optional[str] = Field(None, alias="access_type")
+    has_report_file: Optional[bool] = Field(None, alias="has_report_file")
 
 
 @router.post("/meeting/list", response=List[MeetingSchemaOut])
@@ -540,6 +541,26 @@ def list_meeting(request, filters: MeetingFilters):
         if 'title' in filter_dict:
             title_value = filter_dict.pop('title')
             qs = qs.filter(title__icontains=title_value)
+
+        if 'access_type' in filter_dict:
+            access_type_value = filter_dict.pop('access_type')
+            if access_type_value == 'owned':
+                # 只返回用户拥有的会议
+                qs = qs.filter(owner=user_obj)
+            elif access_type_value == 'shared':
+                # 只返回别人共享给用户的会议（排除用户拥有的）
+                qs = qs.exclude(owner=user_obj)
+        
+         # 处理 has_report_file 筛选
+        if 'has_report_file' in filter_dict:
+            has_report_file_value = filter_dict.pop('has_report_file')
+            if has_report_file_value:
+                # 筛选有纪要且报告文件已生成的会议
+                qs = qs.filter(summary__isnull=False, summary__report_file__isnull=False)
+            else:
+                # 筛选没有纪要或报告文件未生成的会议
+                qs = qs.filter(Q(summary__isnull=True) | Q(summary__report_file__isnull=True))
+        
         
         if filter_dict:
             qs = qs.filter(**filter_dict)
@@ -567,7 +588,7 @@ class MeetingDeleteSchemaIn(Schema):
 def delete_meeting(request, data: MeetingDeleteSchemaIn):
     """删除会议（需要编辑权限）"""
     try:
-        meeting = Meeting.objects.get(id=data.meetingid, delete_status=0)
+        meeting = Meeting.objects.get(id=data.meetingid)
     except Meeting.DoesNotExist:
         raise MeetError("会议不存在或已被删除", BusinessCode.INSTANCE_NOT_FOUND.value)
     

@@ -20,3 +20,4 @@ pydub
 psutil
 django-stubs==5.2.5
 markdown==3.9
+weasyprint==66.0

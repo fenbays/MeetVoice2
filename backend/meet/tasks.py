@@ -13,6 +13,7 @@ from core.services.audio_processor import AudioProcessor
 from .models import MeetingSummary
 import requests
 from openai import OpenAI
+from weasyprint import HTML, CSS
 
 logger = logging.getLogger(__name__)
 
@@ -358,7 +359,7 @@ def _save_processing_results(recording, result):
 
 @shared_task
 def generate_meeting_report_task(meetingid: int):
-    """异步任务：生成会议报告"""
+    """异步任务：生成会议报告 (PDF)"""
     try:
         summary = MeetingSummary.objects.get(meeting_id=meetingid)
         meeting = summary.meeting
@@ -371,52 +372,143 @@ def generate_meeting_report_task(meetingid: int):
         photos = meeting.photos.filter(photo_type=1)
         # 检查签到表
         sign_in_sheets = meeting.photos.filter(photo_type=2)
-        # markdown内容
-        md_content = f"""# {meeting.title}会议报告
-
-## 会议基本信息
-- 会议时间：{meeting.start_time.strftime('%Y年%m月%d日 %H:%M')}
-- 会议地点：{meeting.location_name or '未设置'}
-- 主持人：{moderator.name} {moderator.title or ''} {moderator.company or ''}
-
-## 参会人员
-"""
+        
+        # 构建HTML内容
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <style>
+                body {{
+                    font-family: "Source Han Sans SC";
+                    line-height: 1.6;
+                    padding: 40px;
+                    color: #333;
+                }}
+                h1 {{
+                    text-align: center;
+                    color: #2c3e50;
+                    border-bottom: 3px solid #3498db;
+                    padding-bottom: 10px;
+                    margin-bottom: 30px;
+                }}
+                h2 {{
+                    color: #2980b9;
+                    margin-top: 30px;
+                    margin-bottom: 15px;
+                    border-left: 4px solid #3498db;
+                    padding-left: 10px;
+                }}
+                ul {{
+                    list-style-type: none;
+                    padding-left: 0;
+                }}
+                li {{
+                    margin: 8px 0;
+                    padding-left: 20px;
+                    position: relative;
+                }}
+                li:before {{
+                    content: "•";
+                    position: absolute;
+                    left: 0;
+                    color: #3498db;
+                }}
+                img {{
+                    max-width: 100%;
+                    height: auto;
+                    margin: 15px 0;
+                    border: 1px solid #ddd;
+                    border-radius: 4px;
+                    padding: 5px;
+                }}
+                .photo-description {{
+                    font-style: italic;
+                    color: #666;
+                    margin-top: -10px;
+                    margin-bottom: 20px;
+                }}
+                .meeting-info {{
+                    background-color: #f8f9fa;
+                    padding: 20px;
+                    border-radius: 5px;
+                    margin-bottom: 20px;
+                }}
+            </style>
+        </head>
+        <body>
+            <h1>{meeting.title}会议报告</h1>
+            
+            <div class="meeting-info">
+                <h2>会议基本信息</h2>
+                <ul>
+                    <li>会议时间：{meeting.start_time.strftime('%Y年%m月%d日 %H:%M')}</li>
+                    <li>会议地点：{meeting.location_name or '未设置'}</li>
+                    <li>主持人：{moderator.name} {moderator.title or ''} {moderator.company or ''}</li>
+                </ul>
+            </div>
+            
+            <h2>参会人员</h2>
+            <ul>
+        """
+        
         # 添加参会人员信息
         for p in participants:
             if not p.is_moderator:
-                md_content += f"- {p.name} {p.title or ''} {p.company or ''}\n"
+                html_content += f"<li>{p.name} {p.title or ''} {p.company or ''}</li>\n"
         
-        md_content += "\n## 会议纲要\n"
-        md_content += summary.content
+        html_content += "</ul>\n<h2>会议纲要</h2>\n"
         
-        md_content += "\n## 会议照片\n"
+        # 将markdown内容转换为HTML
+        summary_html = markdown.markdown(summary.content)
+        html_content += f"<div>{summary_html}</div>\n"
+        
+        # 添加会议照片
+        html_content += "<h2>会议照片</h2>\n"
         for photo in photos:
-            md_content += f"![会议照片]({photo.file.url})\n"
+            # 使用绝对路径
+            photo_path = photo.file.url.path if hasattr(photo.file.url, 'path') else photo.file.path
+            html_content += f'<img src="file://{photo_path}" alt="会议照片">\n'
             if photo.description:
-                md_content += f"*{photo.description}*\n\n"
+                html_content += f'<p class="photo-description">{photo.description}</p>\n'
         
-        md_content += "\n## 签到表\n"
+        # 添加签到表
+        html_content += "<h2>签到表</h2>\n"
         for sheet in sign_in_sheets:
-            md_content += f"![签到表]({sheet.file.url})\n"
+            sheet_path = sheet.file.url.path if hasattr(sheet.file.url, 'path') else sheet.file.path
+            html_content += f'<img src="file://{sheet_path}" alt="签到表">\n'
         
-        # 3. 保存为文件
+        html_content += "</body></html>"
+        
+        # 生成PDF文件
         from django.core.files.base import ContentFile
         from system.models import File
+        import io
         
-        # 生成HTML（可选）
-        html_content = markdown.markdown(md_content)
+        # 使用weasyprint生成PDF
+        pdf_buffer = io.BytesIO()
+        HTML(string=html_content).write_pdf(pdf_buffer)
+        pdf_buffer.seek(0)
         
-        # 保存markdown文件
-        md_filename = f"{meeting.title}-会议报告.md"
-        content_file = ContentFile(md_content.encode('utf-8'), name=md_filename)
-        md_file = File.create_from_file(content_file, name=md_filename)
+        # 保存PDF文件
+        pdf_filename = f"{meeting.title}-会议报告.pdf"
+        content_file = ContentFile(pdf_buffer.read(), name=pdf_filename)
+        pdf_file = File.create_from_file(content_file, name=pdf_filename)
         
         # 更新状态
-        summary.report_file = md_file
+        summary.report_file = pdf_file
         summary.generate_status = 2  # 已生成
         summary.save()
         
+        logger.info(f'会议 {meeting.id} 的PDF报告生成完成')
+        
     except Exception as e:
-        summary.generate_status = 3  # 生成失败
-        summary.save()
+        logger.error(f'生成会议报告失败: {str(e)}')
+        logger.error(f'错误详情: {traceback.format_exc()}')
+        try:
+            summary.generate_status = 3  # 生成失败
+            summary.save()
+        except:
+            pass
         raise e
