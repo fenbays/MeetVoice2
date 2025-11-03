@@ -890,7 +890,6 @@
         function updateLoadingUI(stage, message) {
             const statusEl = document.getElementById('initializationStatus');
             
-            // stage 到用户友好文本的映射
             const stageMessages = {
                 'connecting': '正在连接服务器...',
                 'model_loading_started': '正在准备AI模型...',
@@ -903,7 +902,6 @@
                 'transcription_failed': '初始化失败'
             };
             
-            // 使用后端提供的 message，如果没有则使用默认映射
             statusEl.textContent = message || stageMessages[stage] || '处理中...';
         }
 
@@ -950,7 +948,7 @@
                             console.error('WebSocket连接超时');
                             reject(new Error('WebSocket连接超时，请检查网络连接和服务器状态'));
                         }
-                    }, 15000);
+                    }, 600000);
                 });
 
                 websocket.onmessage = handleWebSocketMessage;

@@ -26,7 +26,7 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
         
         # 初始化状态和音频处理
         self.transcription_active = False
-        self.meeting_id = None
+        self.meeting_id = self.scope['url_route']['kwargs']['meeting_id']
         # self.audio_segments = []  # 存储音频段用于最终合并        
         
         # 创建基于配置的临时目录

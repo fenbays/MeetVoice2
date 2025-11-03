@@ -202,7 +202,7 @@ def create_recording(request, meetingid: int=Query(...)):
         if 'audio' not in request.FILES:
             raise MeetError('没有上传音频文件', BusinessCode.BUSINESS_ERROR.value)
 
-        audio_file = request.FILES['audio']
+        laudio_file = request.FILES['audio']
         file_info = validate_audio_file(audio_file)
         request_user = get_user_info_from_token(request)
 

@@ -35,7 +35,7 @@ class Meeting(CoreModel):
     STATUS_CHOICES = [
         (0, '未开始'), # 创建会议的默认状态
         (1, '进行中'), # 录音中、暂停录音、上传录音文件后正在处理录音文件
-        (2, '已结束'), # 用户手动标记，标记后不能再上传录音
+        (2, '已完成'), # 用户手动标记，标记后不能再上传录音
         (3, '已取消'), # 用户取消会议，不能再修改会议信息或上传录音
     ]
     status = models.IntegerField(choices=STATUS_CHOICES, default=0, verbose_name="会议状态", help_text="会议状态")

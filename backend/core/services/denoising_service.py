@@ -28,6 +28,7 @@ class DenoisingService:
             model_config = self.model_manager.model_config.get_model_config("frcrn-ans")
             model_id = self.model_manager.model_config.get_model_id("frcrn-ans")
             model_path = self.model_manager.model_config.get_model_path("frcrn-ans")
+            model_revision = self.model_manager.model_config.get_model_version("frcrn-ans")
             
             if not model_id:
                 print("❌ 降噪模型配置未找到")
@@ -41,7 +42,8 @@ class DenoisingService:
             # 创建降噪管道
             self._pipeline = pipeline(
                 Tasks.acoustic_noise_suppression,
-                model=model_source
+                model=model_source,
+                model_revision = model_revision
             )
             
             print("✅ 降噪模型初始化完成")

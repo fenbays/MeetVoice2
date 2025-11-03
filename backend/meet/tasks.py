@@ -3,6 +3,7 @@ from celery import shared_task
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.core.files import File as DjangoFile
 import markdown
 import os
 import logging
@@ -36,8 +37,13 @@ def process_recording_audio(self, session_id: str, audio_file_path: str, meeting
         
         # 3. 创建File记录
         with open(audio_file_path, 'rb') as f:
+            # 使用 Django File 包装器
+            django_file = DjangoFile(f, name=f'recording_{session_id}.webm')
+            # 添加 size 属性
+            django_file.size = os.path.getsize(audio_file_path)
+            
             file_record = File.create_from_file(
-                f, 
+                django_file, 
                 name=f'recording_{session_id}.webm'
             )
         
@@ -136,7 +142,7 @@ def process_uploaded_audio(self, recording_id):
             recording.duration = result['duration']
         recording.save()
         
-        logger.info(f'录音 {recording_id} 处理完成')
+        logger.info(f'录音 recordingid={recording_id} 处理完成')
         
         # 触发会议纪要生成任务
         generate_meeting_summary.delay(recording_id)
@@ -291,6 +297,11 @@ def generate_meeting_summary(self, recording_id):
         summary.content = summary_content
         summary.generate_status = 2  # 已生成
         summary.save()
+
+          # 8. 更新会议状态为已完成
+        meeting = recording.meeting
+        meeting.status = 2  # 已完成
+        meeting.save()
         
         logger.info(f'会议 {recording.meeting.id} 的纪要生成完成')
         
