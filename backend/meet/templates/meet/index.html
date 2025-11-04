@@ -405,6 +405,73 @@
             font-size: 14px;
             color: var(--muted);
         }
+
+        /* 控制按钮样式 */
+        #recordingControls {
+            display: flex;
+        }
+
+        .control-btn {
+            padding: 10px 24px;
+            border: 2px solid var(--border);
+            background: var(--button-bg);
+            color: var(--text);
+            border-radius: 25px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 14px;
+            font-weight: 500;
+            min-width: 100px;
+        }
+
+        .control-btn:hover:not(:disabled) {
+            border-color: rgb(209, 61, 53);
+            background: var(--loading-bg);
+        }
+
+        .control-btn:disabled {
+            background: var(--muted);
+            cursor: not-allowed;
+            opacity: 0.5;
+        }
+
+        .stop-btn {
+            background: rgb(209, 61, 53);
+            color: white;
+            border-color: rgb(209, 61, 53);
+        }
+
+        .stop-btn:hover:not(:disabled) {
+            background: rgb(189, 41, 33);
+        }
+
+        #recordButton.paused .shape {
+            background-color: rgb(52, 152, 219); /* 蓝色表示暂停状态 */
+        }
+
+        /* 状态指示器 */
+        .status-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 8px;
+            animation: pulse 2s infinite;
+        }
+
+        .status-indicator.recording {
+            background-color: rgb(209, 61, 53);
+        }
+
+        .status-indicator.paused {
+            background-color: rgb(255, 193, 7);
+            animation: none;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
     </style>
 </head>
 <body>
@@ -428,6 +495,12 @@
                     <div class="timer">00:00</div>
                 </div>
             </button>
+            
+            <!-- 暂停/停止按钮组（录音中时显示） -->
+            <div id="recordingControls" style="display: none; margin-top: 20px; gap: 10px; justify-content: center;">
+                <button id="pauseButton" class="control-btn">⏸ 暂停</button>
+                <button id="stopButton" class="control-btn stop-btn">⏹ 停止</button>
+            </div>
         </div>
 
         <!-- 文件上传界面 -->
@@ -514,11 +587,29 @@
         const keywordsField = document.getElementById('keywordsField');
         const results = document.getElementById('results');
 
+        // 新增：控制按钮元素
+        const pauseButton = document.getElementById('pauseButton');
+        const stopButton = document.getElementById('stopButton');
+        const recordingControls = document.getElementById('recordingControls');
+
         // 当前模式和选中文件
         let currentMode = 'record'; // 'record' 或 'upload'
         let selectedFile = null;
 
-        // 添加连接状态枚举
+        // 录音状态枚举（扩展）
+        const RecordingState = {
+            IDLE: 'idle',           // 未开始
+            STARTING: 'starting',   // 正在启动
+            RECORDING: 'recording', // 录音中
+            PAUSED: 'paused',       // 已暂停
+            STOPPING: 'stopping',   // 正在停止
+            PROCESSING: 'processing' // 处理中
+        };
+
+        let recordingState = RecordingState.IDLE;
+        let sessionStatus = null; // 保存服务器返回的会话状态
+
+        // 添加连接状态枚举（保留兼容性）
         const ConnectionState = {
             DISCONNECTED: 'disconnected',
             CONNECTING: 'connecting', 
@@ -799,6 +890,12 @@
 
         function updateTimer() {
             if (!startTime) return;
+            
+            // 如果处于暂停状态，不更新时间
+            if (recordingState === RecordingState.PAUSED) {
+                return;
+            }
+            
             const elapsed = Math.floor((Date.now() - startTime) / 1000);
             const minutes = Math.floor(elapsed / 60).toString().padStart(2, '0');
             const seconds = (elapsed % 60).toString().padStart(2, '0');
@@ -840,11 +937,175 @@
             animationFrame = requestAnimationFrame(drawWaveform);
         }
 
+        // 更新录音UI状态
+        function updateRecordingUI(state) {
+            console.log('更新UI状态:', state);
+            recordingState = state;
+            
+            switch(state) {
+                case RecordingState.IDLE:
+                    recordButton.classList.remove('recording', 'paused');
+                    recordButton.disabled = false;
+                    recordingControls.style.display = 'none';
+                    status.innerHTML = '点击按钮开始录音';
+                    break;
+                    
+                case RecordingState.STARTING:
+                    recordButton.disabled = true;
+                    status.innerHTML = '<span class="status-indicator recording"></span>正在启动...';
+                    break;
+                    
+                case RecordingState.RECORDING:
+                    recordButton.classList.add('recording');
+                    recordButton.classList.remove('paused');
+                    recordButton.disabled = true; // 录音中时主按钮禁用
+                    recordingControls.style.display = 'flex';
+                    pauseButton.disabled = false;
+                    stopButton.disabled = false;
+                    pauseButton.textContent = '⏸ 暂停';
+                    status.innerHTML = '<span class="status-indicator recording"></span>正在录音...';
+                    break;
+                    
+                case RecordingState.PAUSED:
+                    recordButton.classList.add('paused');
+                    recordButton.classList.remove('recording');
+                    recordButton.disabled = false; // 暂停时可以点击继续
+                    pauseButton.textContent = '▶ 继续';
+                    pauseButton.disabled = false;
+                    stopButton.disabled = false;
+                    status.innerHTML = '<span class="status-indicator paused"></span>录音已暂停，点击"继续"恢复录音';
+                    
+                    // 停止波形动画
+                    if (animationFrame) {
+                        cancelAnimationFrame(animationFrame);
+                        animationFrame = null;
+                    }
+                    break;
+                    
+                case RecordingState.STOPPING:
+                case RecordingState.PROCESSING:
+                    recordButton.disabled = true;
+                    pauseButton.disabled = true;
+                    stopButton.disabled = true;
+                    status.innerHTML = '正在处理...';
+                    break;
+            }
+        }
+
+        // 格式化字节数
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+        }
+
+        // 处理会话状态
+        function handleSessionStatus(data) {
+            console.log('会话状态:', data);
+            sessionStatus = data;
+            
+            // recording_status: 0=未开始, 1=录音中, 2=已暂停, 3=已停止, 4=处理中, 5=已完成, 6=已失败
+            switch(data.recording_status) {
+                case 0: // 未开始
+                    updateRecordingUI(RecordingState.IDLE);
+                    break;
+                    
+                case 1: // 录音中（断线重连的情况）
+                    // 断线重连后，提示用户会话被自动暂停，需要重新建立音频连接
+                    status.textContent = '检测到未完成的录音会话（已自动暂停），点击按钮重新开始';
+                    updateRecordingUI(RecordingState.IDLE);
+                    // 关闭可能存在的加载弹窗
+                    hideInitializationOverlay();
+                    break;
+                    
+                case 2: // 已暂停 - 关键修改：显示为可恢复状态
+                    // 关闭加载弹窗（如果有的话）
+                    hideInitializationOverlay();
+                    
+                    // 设置为暂停状态，但允许通过主按钮恢复
+                    recordButton.classList.add('paused');
+                    recordButton.classList.remove('recording');
+                    recordButton.disabled = false;
+                    recordingControls.style.display = 'none'; // 暂停状态下隐藏控制按钮
+                    
+                    // 显示提示信息
+                    if (data.can_resume && data.resume_hint) {
+                        status.innerHTML = '<span class="status-indicator paused"></span>' + 
+                            data.resume_hint + ' (文件大小: ' + formatBytes(data.audio_size) + 
+                            ')，点击按钮继续录音';
+                    } else {
+                        status.innerHTML = '<span class="status-indicator paused"></span>检测到暂停的录音，点击按钮继续';
+                    }
+                    
+                    // 设置内部状态为暂停，但需要重新建立音频连接
+                    recordingState = RecordingState.PAUSED;
+                    break;
+                    
+                case 3: // 已停止（等待处理）
+                case 4: // 处理中
+                    status.textContent = '录音正在后台处理中...';
+                    updateRecordingUI(RecordingState.PROCESSING);
+                    // 关闭可能存在的加载弹窗
+                    hideInitializationOverlay();
+                    break;
+                    
+                case 5: // 已完成
+                    status.textContent = '录音处理已完成';
+                    updateRecordingUI(RecordingState.IDLE);
+                    // 关闭可能存在的加载弹窗
+                    hideInitializationOverlay();
+                    break;
+                    
+                case 6: // 已失败
+                    status.textContent = '录音处理失败，请重新开始';
+                    updateRecordingUI(RecordingState.IDLE);
+                    // 关闭可能存在的加载弹窗
+                    hideInitializationOverlay();
+                    break;
+            }
+        }
+
         // 统一的WebSocket消息处理器
         function handleWebSocketMessage(event) {
             const data = JSON.parse(event.data);
+            console.log('收到消息:', data.type, data);
             
             switch(data.type) {
+                case 'session_status':
+                    // 连接时收到的会话状态
+                    handleSessionStatus(data);
+                    break;
+                    
+                case 'model_loading_progress':
+                    // 模型加载进度在 waitForModelReady 中处理
+                    break;
+                    
+                case 'transcription_paused':
+                    // 暂停成功
+                    console.log('录音已暂停');
+                    updateRecordingUI(RecordingState.PAUSED);
+                    status.textContent = `录音已暂停 (已暂停${data.pause_count}次，文件大小: ${formatBytes(data.audio_file_size)})`;
+                    break;
+                    
+                case 'transcription_resumed':
+                    // 恢复成功
+                    console.log('录音已恢复');
+                    updateRecordingUI(RecordingState.RECORDING);
+                    // 重新启动波形动画
+                    if (!animationFrame) {
+                        drawWaveform();
+                    }
+                    break;
+                    
+                case 'transcription_stopped':
+                    // 停止成功
+                    console.log('录音已停止');
+                    updateRecordingUI(RecordingState.PROCESSING);
+                    status.textContent = data.message;
+                    break;
+                
                 case 'transcription_result':
                     updateTranscription(data.result);
                     break;
@@ -866,7 +1127,16 @@
                     break;
                     
                 case 'error':
-                    showError(data.message);
+                    // 特殊处理：如果错误是关于暂停状态的，提示用户点击按钮恢复
+                    if (data.message && data.message.includes('暂停状态')) {
+                        console.log('检测到暂停状态错误，更新UI');
+                        updateRecordingUI(RecordingState.PAUSED);
+                        recordButton.classList.add('paused');
+                        status.innerHTML = '<span class="status-indicator paused"></span>检测到暂停的录音，点击按钮继续录音';
+                        showError('会话处于暂停状态，点击按钮继续录音');
+                    } else {
+                        showError(data.message);
+                    }
                     break;
                     
                 default:
@@ -1005,6 +1275,7 @@
             try {
                 console.log('开始录音流程...');
                 
+                updateRecordingUI(RecordingState.STARTING);
                 updateConnectionState(ConnectionState.CONNECTING);
                 
                 accumulatedText = '';
@@ -1013,16 +1284,16 @@
                 
                 showInitializationOverlay();
                 
-                await setupWebSocket();
-
-                console.log('WebSocket连接成功，等待模型加载...');
-                updateLoadingUI('loading_models', '正在加载AI模型...');
-                // updateInitializationProgress(InitializationSteps.LOADING_MODELS);
-                await waitForModelReady();
+                // 如果还没有WebSocket连接，建立连接
+                if (!websocket || websocket.readyState !== WebSocket.OPEN) {
+                    await setupWebSocket();
+                    console.log('WebSocket连接成功，等待模型加载...');
+                    updateLoadingUI('loading_models', '正在加载AI模型...');
+                    await waitForModelReady();
+                }
                 
                 updateLoadingUI('initializing_audio', '正在初始化音频...');
-                // updateInitializationProgress(InitializationSteps.INITIALIZING_AUDIO);
-                console.log('WebSocket连接成功，开始初始化音频...');
+                console.log('开始初始化音频...');
                 
                 const stream = await navigator.mediaDevices.getUserMedia({
                     audio: {
@@ -1033,7 +1304,6 @@
                     }
                 });
                 
-                // updateInitializationProgress(InitializationSteps.READY);
                 updateLoadingUI('ready', '音频设备准备就绪');
                 console.log('音频流获取成功');
 
@@ -1068,20 +1338,22 @@
                     audioBitsPerSecond: 128000
                 });
 
-                // === 保存到全局供stopRecording使用 ===
                 window.mediaRecorder = recorder;
                 window.audioStream = stream;
 
                 recorder.ondataavailable = (e) => {
                     if (websocket && websocket.readyState === WebSocket.OPEN && e.data.size > 0) {
-                        websocket.send(e.data);
+                        // 只在录音中状态发送数据（暂停时不发送）
+                        if (recordingState === RecordingState.RECORDING) {
+                            websocket.send(e.data);
+                        }
                     }
                 };
 
                 recorder.onerror = (error) => {
                     console.error('MediaRecorder错误:', error);
                     showError('录音出现错误，请重试');
-                    updateConnectionState(ConnectionState.DISCONNECTED);
+                    updateRecordingUI(RecordingState.IDLE);
                 };
 
                 recorder.start(5000);
@@ -1091,9 +1363,7 @@
                 drawWaveform();
 
                 isRecording = true;
-                recordButton.classList.add('recording');
-                status.textContent = '正在录音...';
-                
+                updateRecordingUI(RecordingState.RECORDING);
                 updateConnectionState(ConnectionState.CONNECTED);
                 
                 setTimeout(() => {
@@ -1103,9 +1373,128 @@
             } catch (err) {
                 console.error('录音初始化失败:', err);
                 hideInitializationOverlay();
+                updateRecordingUI(RecordingState.IDLE);
                 updateConnectionState(ConnectionState.DISCONNECTED);
                 status.textContent = '无法访问麦克风，请检查权限设置';
                 showError('录音初始化失败: ' + err.message);
+            }
+        }
+
+        // 重新初始化音频并恢复录音（用于断线重连后的恢复）
+        async function startRecordingAndResume() {
+            try {
+                console.log('重新初始化音频并恢复录音...');
+                
+                updateRecordingUI(RecordingState.STARTING);
+                
+                showInitializationOverlay();
+                updateLoadingUI('initializing_audio', '正在获取麦克风权限...');
+                
+                // 1. 建立 WebSocket 连接（如果还没有）
+                if (!websocket || websocket.readyState !== WebSocket.OPEN) {
+                    updateLoadingUI('connecting', '正在连接服务器...');
+                    await setupWebSocket();
+                    console.log('WebSocket连接成功');
+                }
+                
+                // 2. 获取音频流
+                updateLoadingUI('initializing_audio', '正在初始化音频设备...');
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        sampleRate: 16000,
+                        channelCount: 1,
+                        echoCancellation: false,
+                        noiseSuppression: false
+                    }
+                });
+                
+                console.log('音频流获取成功');
+
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                    sampleRate: 16000
+                });
+
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 256;
+
+                microphone = audioContext.createMediaStreamSource(stream);
+                microphone.connect(analyser);
+
+                const supportedTypes = [
+                    'audio/webm;codecs=opus',
+                    'audio/webm',
+                    'audio/mp4',
+                    'audio/ogg;codecs=opus'
+                ];
+                
+                let selectedType = 'audio/webm';
+                for (const type of supportedTypes) {
+                    if (MediaRecorder.isTypeSupported(type)) {
+                        selectedType = type;
+                        console.log('使用音频格式:', type);
+                        break;
+                    }
+                }
+
+                const recorder = new MediaRecorder(stream, {
+                    mimeType: selectedType,
+                    audioBitsPerSecond: 128000
+                });
+
+                window.mediaRecorder = recorder;
+                window.audioStream = stream;
+
+                recorder.ondataavailable = (e) => {
+                    if (websocket && websocket.readyState === WebSocket.OPEN && e.data.size > 0) {
+                        if (recordingState === RecordingState.RECORDING) {
+                            websocket.send(e.data);
+                        }
+                    }
+                };
+
+                recorder.onerror = (error) => {
+                    console.error('MediaRecorder错误:', error);
+                    showError('录音出现错误，请重试');
+                    updateRecordingUI(RecordingState.IDLE);
+                };
+
+                recorder.start(5000);
+
+                // 3. 发送恢复命令到服务器
+                updateLoadingUI('ready', '正在恢复录音...');
+                if (websocket && websocket.readyState === WebSocket.OPEN) {
+                    console.log('发送恢复录音命令...');
+                    websocket.send(JSON.stringify({
+                        type: 'resume_transcription'
+                    }));
+                }
+
+                // 4. 启动定时器和波形
+                if (!startTime) {
+                    startTime = Date.now();
+                }
+                if (!timerInterval) {
+                    timerInterval = setInterval(updateTimer, 1000);
+                }
+                drawWaveform();
+
+                isRecording = true;
+                updateRecordingUI(RecordingState.RECORDING);
+                updateConnectionState(ConnectionState.CONNECTED);
+                
+                // 稍微延迟关闭遮罩，等待服务器确认
+                setTimeout(() => {
+                    hideInitializationOverlay();
+                }, 300);
+
+                console.log('音频初始化完成，已发送恢复命令');
+
+            } catch (err) {
+                console.error('恢复录音失败:', err);
+                hideInitializationOverlay();
+                updateRecordingUI(RecordingState.PAUSED);
+                updateConnectionState(ConnectionState.DISCONNECTED);
+                showError('恢复录音失败: ' + err.message);
             }
         }
 
@@ -1116,6 +1505,15 @@
                 function handleModelMessages(event) {
                     const data = JSON.parse(event.data);
                     console.log('模型加载消息:', data);
+                    
+                    // 处理错误消息
+                    if (data.type === 'error') {
+                        console.error('模型加载过程中收到错误:', data.message);
+                        websocket.onmessage = originalOnMessage;
+                        hideInitializationOverlay(); // 关闭弹窗
+                        reject(new Error(data.message || '初始化失败'));
+                        return;
+                    }
                     
                     // 统一处理 model_loading_progress 消息
                     if (data.type === 'model_loading_progress') {
@@ -1131,6 +1529,7 @@
                             resolve();
                         } else if (stage === 'transcription_failed') {
                             websocket.onmessage = originalOnMessage;
+                            hideInitializationOverlay(); // 关闭弹窗
                             reject(new Error(message || '模型加载失败'));
                         }
                     } else {
@@ -1146,22 +1545,67 @@
                 // 超时保护（5分钟）
                 setTimeout(() => {
                     websocket.onmessage = originalOnMessage;
+                    hideInitializationOverlay(); // 关闭弹窗
                     reject(new Error('模型加载超时'));
                 }, 300000);
             });
         }
 
+        // 暂停录音
+        function pauseRecording() {
+            console.log('暂停录音');
+            
+            if (websocket && websocket.readyState === WebSocket.OPEN) {
+                websocket.send(JSON.stringify({
+                    type: 'pause_transcription'
+                }));
+                
+                // 暂停定时器
+                if (timerInterval) {
+                    clearInterval(timerInterval);
+                    timerInterval = null;
+                }
+                
+                updateRecordingUI(RecordingState.PAUSED);
+            }
+        }
+        
+        // 继续录音
+        function resumeRecording() {
+            console.log('继续录音');
+            
+            if (websocket && websocket.readyState === WebSocket.OPEN) {
+                websocket.send(JSON.stringify({
+                    type: 'resume_transcription'
+                }));
+                
+                // 恢复定时器
+                if (!timerInterval) {
+                    timerInterval = setInterval(updateTimer, 1000);
+                }
+                
+                // 暂时设置为录音中，等待服务器确认
+                updateRecordingUI(RecordingState.RECORDING);
+                
+                // 重新启动波形动画
+                if (!animationFrame) {
+                    drawWaveform();
+                }
+            }
+        }
+
         async function stopRecording() {
             console.log('开始停止录音流程...');
+            updateRecordingUI(RecordingState.STOPPING);
             updateConnectionState(ConnectionState.STOPPING);
     
-            // === 新增：停止MediaRecorder ===
+            // 停止MediaRecorder
             if (window.mediaRecorder && window.mediaRecorder.state !== 'inactive') {
                 window.mediaRecorder.stop();
                 console.log('MediaRecorder已停止');
             }
             
-            // === 新增：停止音频流 ===
+            // 停止音频流
             if (window.audioStream) {
                 window.audioStream.getTracks().forEach(track => track.stop());
                 console.log('音频流已停止');
@@ -1173,6 +1617,7 @@
                 }));
                 
                 status.textContent = '录音已停止，正在处理音频...';
+                updateRecordingUI(RecordingState.PROCESSING);
                 updateConnectionState(ConnectionState.PROCESSING);
                 
                 const originalOnMessage = websocket.onmessage;
@@ -1185,6 +1630,7 @@
                     } else if (data.type === 'offline_processing_completed') {
                         status.textContent = '处理完成';
                         showFinalResults(data.result);
+                        updateRecordingUI(RecordingState.IDLE);
                         updateConnectionState(ConnectionState.DISCONNECTED);
                         setTimeout(() => {
                             if (websocket) {
@@ -1207,6 +1653,7 @@
                         websocket.close();
                         websocket = null;
                         status.textContent = '处理超时，连接已关闭';
+                        updateRecordingUI(RecordingState.IDLE);
                         updateConnectionState(ConnectionState.DISCONNECTED);
                     }
                 }, 30000);
@@ -1231,18 +1678,42 @@
             startTime = null;
 
             isRecording = false;
-            recordButton.classList.remove('recording');
+            recordButton.classList.remove('recording', 'paused');
         }
 
+        // 主录音按钮点击事件
         recordButton.addEventListener('click', () => {
-            console.log('按钮点击，当前状态:', connectionState, '是否录音中:', isRecording);
+            console.log('主按钮点击，当前状态:', recordingState, '音频流存在:', !!window.audioStream);
             
-            if (connectionState === ConnectionState.DISCONNECTED && !isRecording) {
+            if (recordingState === RecordingState.IDLE) {
                 startRecording();
-            } else if (connectionState === ConnectionState.CONNECTED && isRecording) {
-                stopRecording();
+            } else if (recordingState === RecordingState.PAUSED) {
+                // 检查是否有活跃的音频流
+                if (window.audioStream && window.mediaRecorder) {
+                    // 有音频流，直接恢复录音
+                    resumeRecording();
+                } else {
+                    // 没有音频流（断线重连后），需要重新初始化音频并恢复录音
+                    startRecordingAndResume();
+                }
             } else {
-                console.log('按钮被禁用，当前状态:', connectionState);
+                console.log('按钮在当前状态下不可用:', recordingState);
+            }
+        });
+        
+        // 暂停按钮点击事件
+        pauseButton.addEventListener('click', () => {
+            if (recordingState === RecordingState.RECORDING) {
+                pauseRecording();
+            } else if (recordingState === RecordingState.PAUSED) {
+                resumeRecording();
+            }
+        });
+        
+        // 停止按钮点击事件
+        stopButton.addEventListener('click', () => {
+            if (recordingState === RecordingState.RECORDING || recordingState === RecordingState.PAUSED) {
+                stopRecording();
             }
         });
 
@@ -1317,19 +1788,25 @@
 
         function showError(message) {
             console.error('错误:', message);
-            status.textContent = `错误: ${message}`;
-
+            
             const processingDiv = document.querySelector('.processing-indicator');
             if (processingDiv) {
                 processingDiv.remove();
             }
 
-            status.style.color = '#f44336';
-            setTimeout(() => {
-                status.style.color = '';
-            }, 5000);
-            
-            updateConnectionState(ConnectionState.DISCONNECTED);
+            // 如果不是暂停状态相关的错误，才显示错误样式
+            if (!message.includes('暂停状态') && !message.includes('继续录音')) {
+                status.textContent = `错误: ${message}`;
+                status.style.color = '#f44336';
+                setTimeout(() => {
+                    status.style.color = '';
+                }, 5000);
+                
+                // 只有在非暂停错误时才重置连接状态
+                if (recordingState !== RecordingState.PAUSED) {
+                    updateConnectionState(ConnectionState.DISCONNECTED);
+                }
+            }
         }
 
         function getCookie(name) {
@@ -1348,25 +1825,25 @@
         }
 
         function updateConnectionState(newState) {
-            console.log('状态变更:', connectionState, '->', newState);
+            console.log('连接状态变更:', connectionState, '->', newState);
             connectionState = newState;
             
+            // 连接状态现在主要用于内部跟踪，UI 状态由 recordingState 控制
             switch(newState) {
                 case ConnectionState.CONNECTING:
-                    recordButton.disabled = true;
-                    status.textContent = '正在连接...';
+                    // 由 updateRecordingUI 控制按钮状态
                     break;
                 case ConnectionState.CONNECTED:
-                    recordButton.disabled = false;
+                    // 已连接，等待录音状态控制
                     break;
                 case ConnectionState.STOPPING:
                 case ConnectionState.PROCESSING:
-                    recordButton.disabled = true;
+                    // 处理中，禁用所有控制
                     break;
                 case ConnectionState.DISCONNECTED:
-                    recordButton.disabled = false;
-                    if (currentMode === 'record') {
-                        status.textContent = '点击按钮开始录音';
+                    // 断开连接，恢复到空闲状态
+                    if (recordingState !== RecordingState.IDLE && recordingState !== RecordingState.PAUSED) {
+                        updateRecordingUI(RecordingState.IDLE);
                     }
                     break;
             }

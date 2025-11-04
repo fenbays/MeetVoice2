@@ -11,7 +11,7 @@ import logging
 from system.models import File
 from .models import Recording, Speaker, Segment, MeetingSummary, Meeting, MeetingPhoto
 from core.services.audio_processor import AudioProcessor
-from .models import MeetingSummary
+from .models import MeetingSummary, RealtimeRecordingSession
 import requests
 from openai import OpenAI
 from weasyprint import HTML, CSS
@@ -25,6 +25,13 @@ def process_recording_audio(self, session_id: str, audio_file_path: str, meeting
     
     这个任务完全独立于WebSocket连接
     """
+
+    try:
+        session = RealtimeRecordingSession.objects.get(session_id=session_id)
+        session.mark_processing()
+    except RealtimeRecordingSession.DoesNotExist:
+        logger.warning(f"会话 {session_id} 不存在，继续处理")
+        session = None
     try:
         logger.info(f"开始处理实时录音: session={session_id}, file={audio_file_path}, meeting_id={meeting_id}")
         
@@ -69,7 +76,11 @@ def process_recording_audio(self, session_id: str, audio_file_path: str, meeting
         from meet.tasks import process_uploaded_audio
         process_uploaded_audio.delay(recording.id)
         
-        # 6. 清理临时文件
+        # 标记会话为已完成
+        if session:
+            session.mark_completed(recording)
+
+        # 清理临时文件
         try:
             os.remove(audio_file_path)
         except Exception as e:
@@ -82,6 +93,9 @@ def process_recording_audio(self, session_id: str, audio_file_path: str, meeting
         logger.error(f"录音处理失败: {e}")
         import traceback
         traceback.print_exc()
+        # 标记会话为失败
+        if session:
+            session.mark_failed(str(e))
         return {'success': False, 'error': str(e)}
 
 @shared_task(bind=True)

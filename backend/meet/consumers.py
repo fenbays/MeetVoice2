@@ -4,9 +4,12 @@ import logging
 import datetime
 import tempfile
 import os
+import uuid
 from channels.generic.websocket import AsyncWebsocketConsumer
 from channels.db import database_sync_to_async
-from .models import Meeting, Recording
+from django.db import transaction
+from .models import Meeting, Recording, RealtimeRecordingSession
+from django.utils import timezone
 
 # 集成src目录的服务
 import sys
@@ -21,23 +24,31 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
     async def connect(self):
         """初始化连接"""
         self.connected = True  # 连接状态标记
-        self.session_id = self.scope['url_route']['kwargs']['meeting_id']
-        self.room_group_name = f'transcribe_{self.session_id}'
-        
-        # 初始化状态和音频处理
-        self.transcription_active = False
         self.meeting_id = self.scope['url_route']['kwargs']['meeting_id']
-        # self.audio_segments = []  # 存储音频段用于最终合并        
+        self.room_group_name = f'transcribe_{self.meeting_id}'
         
-        # 创建基于配置的临时目录
+        # ← 从数据库获取或创建会话
+        self.session = await self._get_or_create_session()
+        self.session_id = self.session.session_id
+        
+        # 初始化状态（从数据库恢复）
+        self.transcription_active = (self.session.recording_status == 1)  # 录音中
+        self.is_paused = (self.session.recording_status == 2)  # 已暂停
+        
+        # 临时目录和文件路径
         from django.conf import settings
         temp_base = getattr(settings, 'MEETVOICE_TEMP_DIR', '/tmp/meetvoice')
         os.makedirs(temp_base, exist_ok=True)
         self.temp_dir = os.path.join(temp_base, self.session_id)
         os.makedirs(self.temp_dir, exist_ok=True)
-
-        # 音频临时文件路径和文件句柄
-        self.temp_audio_file = os.path.join(self.temp_dir, f'recording_{self.session_id}.webm')
+        
+        # 使用数据库中的路径或创建新路径
+        if self.session.temp_audio_path:
+            self.temp_audio_file = self.session.temp_audio_path
+        else:
+            self.temp_audio_file = os.path.join(self.temp_dir, f'recording_{self.session_id}.webm')
+            await self._update_session_audio_path(self.temp_audio_file)
+        
         self.audio_file_handle = None
         
         # 初始化转录服务
@@ -64,12 +75,53 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
         )
         
         await self.accept()
-        logger.info(f"转录会话 {self.session_id} 已连接")
+        
+        # ← 发送当前状态给前端
+        await self.send(text_data=json.dumps({
+            'type': 'session_status',
+            'session_id': self.session_id,
+            'recording_status': self.session.recording_status,
+            'recording_status_display': dict(RealtimeRecordingSession.RECORDING_STATUS_CHOICES)[self.session.recording_status],
+            'pause_count': self.session.pause_count,
+            'audio_size': self.session.audio_size,
+            'message': '会话已连接',
+            'can_resume': self.session.recording_status == 2,  # 是否处于暂停状态
+            'resume_hint': '检测到未完成的录音，可以继续录音' if self.session.recording_status == 2 else None
+
+        }))
+        
+        logger.info(f"转录会话 {self.session_id} 已连接，状态: {self.session.get_recording_status_display()}")
     
     async def disconnect(self, close_code):
         """断开连接：只清理WebSocket相关资源"""
         self.connected = False
-        logger.info(f"会话 {self.session_id} 断开连接")
+        logger.info(f"会话 {self.session_id} 断开连接，close_code={close_code}")
+        
+        # ← 新增：如果正在录音，自动暂停并保存状态（支持断线重连后继续）
+        if hasattr(self, 'session') and self.session:
+            try:
+                # 刷新会话状态
+                await self._refresh_session()
+                
+                # 如果正在录音，自动暂停
+                if self.session.recording_status == 1:  # 录音中
+                    logger.info(f"会话 {self.session_id} 断开时正在录音，自动暂停")
+                    
+                    # 关闭文件句柄并刷新数据
+                    if hasattr(self, 'audio_file_handle') and self.audio_file_handle:
+                        try:
+                            self.audio_file_handle.flush()
+                            self.audio_file_handle.close()
+                            self.audio_file_handle = None
+                        except Exception as e:
+                            logger.error(f"关闭文件句柄失败: {e}")
+                    
+                    # 更新数据库状态为暂停
+                    await self._session_pause_recording()
+                    await self._session_update_audio_info()
+                    logger.info(f"会话 {self.session_id} 已自动暂停，用户可稍后重连继续录音")
+            except Exception as e:
+                logger.error(f"保存会话状态失败: {e}")
         
         # 停止接收音频
         self.transcription_active = False
@@ -81,7 +133,7 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
             except Exception as e:
                 logger.error(f"关闭文件句柄失败: {e}")
         
-        # 清理AudioProcessor
+        # 清理AudioProcessor（保留临时文件和会话状态）
         if hasattr(self, 'audio_processor') and self.audio_processor:
             try:
                 await self.audio_processor.cleanup()
@@ -127,6 +179,12 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
         message_type = data.get('type')
         
         if message_type == 'start_transcription':
+            # ← 检查数据库状态
+            can_start, msg = await self._check_can_start()
+            if not can_start:
+                await self.send_error(msg)
+                return
+                
             """
             启动流程：
             1. 发送"开始加载模型"消息
@@ -143,7 +201,25 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
             # 异步执行初始化（只调用一次）
             asyncio.create_task(self._initialize_and_start_processing())
         
+        elif message_type == 'pause_transcription':
+            can_pause, msg = await self._check_can_pause()
+            if not can_pause:
+                await self.send_error(msg)
+                return
+            await self._handle_pause_transcription()
+        
+        elif message_type == 'resume_transcription':
+            can_resume, msg = await self._check_can_resume()
+            if not can_resume:
+                await self.send_error(msg)
+                return
+            await self._handle_resume_transcription()
+        
         elif message_type == 'stop_transcription':
+            can_stop, msg = await self._check_can_stop()
+            if not can_stop:
+                await self.send_error(msg)
+                return
             await self._handle_stop_transcription()
                 
         elif message_type == 'ping':
@@ -192,21 +268,25 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
             
             logger.info("模型加载完成")
             
-            # 3. 检查AudioProcessor
+            # 4. 检查AudioProcessor
             if not hasattr(self, 'audio_processor') or self.audio_processor is None:
                 raise Exception("AudioProcessor未初始化")
             
-            # 4. 启动AudioProcessor（只调用一次）
+            # 5. 启动AudioProcessor（只调用一次）
             logger.info("启动AudioProcessor...")
             self.results_generator = await self.audio_processor.create_tasks()
             
-            # 5. 启动结果处理任务
+            # 6. 启动结果处理任务
             self.result_handler_task = asyncio.create_task(self._handle_results())
+
+            # 7. 更新数据库状态为"录音中"
+            await self._session_start_recording()
             
-            # 6. 设置转录激活标志
+            # 8. 设置转录激活标志
             self.transcription_active = True
-            
-            # 7. 发送完成消息
+            self.is_paused = False
+
+            # 9. 发送完成消息
             await self.send(text_data=json.dumps({
                 'type': 'model_loading_progress',
                 'session_id': self.session_id,
@@ -220,6 +300,13 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
             logger.error(f"初始化失败: {e}")
             import traceback
             traceback.print_exc()
+
+            try:
+                await self._session_mark_failed(f"初始化失败: {str(e)}")
+            except Exception as db_error:
+                logger.error(f"更新失败状态到数据库失败: {db_error}")
+            finally:
+                await self._cleanup_audio_processor()
             
             # 发送错误消息
             await self.send(text_data=json.dumps({
@@ -229,31 +316,99 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
                 'message': f'初始化失败，请刷新页面重试: {str(e)}'
             }))
 
-    async def _handle_stop_transcription(self):
-        """处理停止转录：立即停止接收，启动后台任务"""
-        logger.info(f"停止录音信号收到")
+    async def _handle_pause_transcription(self):
+        """处理暂停"""
+        logger.info(f"暂停录音")
         
-        # 1. 立即停止接收新音频数据
-        self.transcription_active = False
+        # 1. 设置内存标志
+        self.is_paused = True
         
-        # 2. 关闭音频文件句柄
+        # 2. 关闭文件句柄
         if self.audio_file_handle:
-            self.audio_file_handle.close()
-            self.audio_file_handle = None
+            try:
+                self.audio_file_handle.flush()
+                self.audio_file_handle.close()
+                self.audio_file_handle = None
+            except Exception as e:
+                logger.error(f"关闭文件句柄失败: {e}")
         
-        # 3. 立即响应前端（用户可以离开）
+        # 3. 更新数据库状态
+        await self._session_pause_recording()
+        await self._session_update_audio_info()
+        
+        # 4. 刷新session对象
+        await self._refresh_session()
+        
+        # 5. 响应前端
         await self.send(text_data=json.dumps({
-            'type': 'transcription_stopped',
+            'type': 'transcription_paused',
             'session_id': self.session_id,
-            'message': '录音已停止，正在后台处理...'
+            'message': '录音已暂停',
+            'pause_count': self.session.pause_count,
+            'audio_file_size': self.session.audio_size
         }))
+
+    async def _handle_resume_transcription(self):
+        """处理恢复"""
+        logger.info(f"恢复录音")
         
-        # 4. 验证文件存在
+        try:
+            # 1. 检查文件存在
+            if not os.path.exists(self.temp_audio_file):
+                raise Exception(f"音频文件不存在: {self.temp_audio_file}")
+            
+            # 2. 以追加模式打开文件
+            self.audio_file_handle = open(self.temp_audio_file, 'ab')
+            
+            # 3. 更新数据库状态
+            await self._session_resume_recording()
+            
+            # 4. 设置内存标志
+            self.is_paused = False
+            
+            # 5. 刷新session对象
+            await self._refresh_session()
+            
+            # 6. 响应前端
+            await self.send(text_data=json.dumps({
+                'type': 'transcription_resumed',
+                'session_id': self.session_id,
+                'message': '录音已恢复',
+                'pause_count': self.session.pause_count,
+                'audio_file_size': self.session.audio_size
+            }))
+            
+        except Exception as e:
+            logger.error(f"恢复录音失败: {e}")
+            await self.send_error(f"恢复录音失败: {str(e)}")
+
+    async def _handle_stop_transcription(self):
+        """处理停止"""
+        logger.info(f"停止录音")
+        
+        # 1. 设置标志
+        self.transcription_active = False
+        self.is_paused = False
+        
+        # 2. 关闭文件句柄
+        if self.audio_file_handle:
+            try:
+                self.audio_file_handle.flush()
+                self.audio_file_handle.close()
+                self.audio_file_handle = None
+            except Exception as e:
+                logger.error(f"关闭文件句柄失败: {e}")
+        
+        # 3. 更新音频信息
+        await self._session_update_audio_info()
+        
+        # 4. 验证文件
         if not os.path.exists(self.temp_audio_file):
-            logger.error("录音文件不存在，无法处理")
+            logger.error("录音文件不存在")
+            await self.send_error("录音文件不存在")
             return
         
-        # 5. 启动后台异步任务（Celery）
+        # 5. 启动后台任务
         from meet.tasks import process_recording_audio
         task = process_recording_audio.delay(
             session_id=self.session_id,
@@ -261,10 +416,28 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
             meeting_id=self.meeting_id
         )
         
-        logger.info(f"后台任务已启动: {task.id}，用户可以离开页面")
+        # 6. 更新数据库状态
+        await self._session_stop_recording(task_id=task.id)
+        await self._refresh_session()
         
-        # 6. 清理AudioProcessor（只清理实时转写资源）
+        # 7. 响应前端
+        await self.send(text_data=json.dumps({
+            'type': 'transcription_stopped',
+            'session_id': self.session_id,
+            'message': '录音已停止，正在后台处理...',
+            'pause_count': self.session.pause_count,
+            'task_id': task.id
+        }))
+        
+        logger.info(f"后台任务已启动: {task.id}")
+        
+        # 8. 清理AudioProcessor
         await self._cleanup_audio_processor()
+    
+    @database_sync_to_async
+    def _refresh_session(self):
+        """刷新session对象"""
+        self.session.refresh_from_db()
 
     async def _cleanup_audio_processor(self):
         """安全清理AudioProcessor"""
@@ -333,13 +506,19 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
 
     async def handle_audio_data(self, audio_bytes):
         """音频数据写盘"""
-        if not self.transcription_active:
+        if not self.transcription_active or self.is_paused:
+            if self.is_paused:
+                logger.debug("处于暂停状态，忽略音频数据")
             return
         
         try:
             # 1. 实时写入磁盘
             if self.audio_file_handle is None:
-                self.audio_file_handle = open(self.temp_audio_file, 'wb')
+                # ← 修复：根据文件是否存在选择打开模式
+                # 如果文件存在（恢复录音），用追加模式；否则用写入模式
+                mode = 'ab' if os.path.exists(self.temp_audio_file) else 'wb'
+                self.audio_file_handle = open(self.temp_audio_file, mode)
+                logger.debug(f"音频文件已打开 (mode={mode}, path={self.temp_audio_file})")
             
             self.audio_file_handle.write(audio_bytes)
             
@@ -349,6 +528,8 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
                 
         except Exception as e:
             logger.error(f"音频数据处理异常: {e}")
+            # ← 添加：通知前端错误
+            await self.send_error(f"音频数据处理异常: {str(e)}")
 
     async def _handle_results(self):
         """处理AudioProcessor的结果流"""
@@ -583,3 +764,99 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
             return Meeting.objects.get(id=meeting_id)
         except Meeting.DoesNotExist:
             return None
+
+    @database_sync_to_async
+    def _get_or_create_session(self):
+        """获取或创建实时录音会话"""
+        meeting = Meeting.objects.get(id=self.meeting_id)
+        
+     # ← 使用事务锁防止并发问题
+        with transaction.atomic():
+            # 使用 select_for_update 锁定会议记录
+            meeting = Meeting.objects.select_for_update().get(id=self.meeting_id)
+            
+            # 尝试获取现有会话
+            try:
+                session = RealtimeRecordingSession.objects.select_for_update().get(meeting=meeting)
+                
+                # 如果会话已完成或失败，创建新会话
+                if session.recording_status in [5, 6]:
+                    session.delete()
+                    raise RealtimeRecordingSession.DoesNotExist
+                        
+            except RealtimeRecordingSession.DoesNotExist:
+                # 创建新会话
+                session_id = str(meeting.id)
+                session = RealtimeRecordingSession.objects.create(
+                    meeting=meeting,
+                    session_id=session_id,
+                    recording_status=0  # 未开始
+                )
+        
+        return session
+    
+    @database_sync_to_async
+    def _update_session_audio_path(self, path):
+        """更新会话的音频文件路径"""
+        self.session.temp_audio_path = path
+        self.session.save(update_fields=['temp_audio_path'])
+    
+    @database_sync_to_async
+    def _update_session_status(self, status):
+        """更新会话状态"""
+        self.session.recording_status = status
+        self.session.save(update_fields=['recording_status', 'update_datetime'])
+    
+    @database_sync_to_async
+    def _session_start_recording(self):
+        """数据库：开始录音"""
+        self.session.start_recording()
+    
+    @database_sync_to_async
+    def _session_pause_recording(self):
+        """数据库：暂停录音"""
+        self.session.pause_recording()
+    
+    @database_sync_to_async
+    def _session_resume_recording(self):
+        """数据库：恢复录音"""
+        self.session.resume_recording()
+    
+    @database_sync_to_async
+    def _session_stop_recording(self, task_id=None):
+        """数据库：停止录音"""
+        self.session.stop_recording(task_id=task_id)
+
+    @database_sync_to_async
+    def _session_mark_failed(self, error_message):
+        """数据库：标记为失败"""
+        self.session.mark_failed(error_message)
+    
+    @database_sync_to_async
+    def _session_update_audio_info(self):
+        """数据库：更新音频信息"""
+        self.session.update_audio_info()
+
+    @database_sync_to_async
+    def _check_can_start(self):
+        """检查是否可以开始"""
+        self.session.refresh_from_db()
+        return self.session.can_start_recording()
+    
+    @database_sync_to_async
+    def _check_can_pause(self):
+        """检查是否可以暂停"""
+        self.session.refresh_from_db()
+        return self.session.can_pause_recording()
+    
+    @database_sync_to_async
+    def _check_can_resume(self):
+        """检查是否可以恢复"""
+        self.session.refresh_from_db()
+        return self.session.can_resume_recording()
+    
+    @database_sync_to_async
+    def _check_can_stop(self):
+        """检查是否可以停止"""
+        self.session.refresh_from_db()
+        return self.session.can_stop_recording()

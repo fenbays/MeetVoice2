@@ -1,3 +1,4 @@
+import os
 from django.utils import timezone
 from django.db import models
 from django.contrib.auth import get_user_model
@@ -445,3 +446,217 @@ class MeetingPhoto(CoreModel):
         
     def __str__(self):
         return f"{self.get_photo_type_display()} - {self.description or self.file.name}"
+
+
+class RealtimeRecordingSession(CoreModel):
+    """实时录音会话表 - 管理WebSocket实时录音的状态"""
+    
+    meeting = models.OneToOneField(
+        Meeting, 
+        on_delete=models.CASCADE, 
+        related_name='realtime_session',
+        verbose_name="关联会议", 
+        help_text="关联会议（一个会议同时只能有一个实时录音会话）"
+    )
+    
+    # 会话唯一标识（可以用UUID，也可以直接用meeting_id的字符串形式）
+    session_id = models.CharField(
+        max_length=100, 
+        unique=True,
+        verbose_name="会话ID", 
+        help_text="实时录音会话唯一标识"
+    )
+    
+    # 录音状态
+    RECORDING_STATUS_CHOICES = [
+        (0, '未开始'),      # 会话创建，但还未开始录音
+        (1, '录音中'),      # 正在录音
+        (2, '已暂停'),      # 用户暂停了录音
+        (3, '已停止'),      # 用户停止录音，等待处理
+        (4, '处理中'),      # 后台正在处理
+        (5, '已完成'),      # 处理完成，已生成Recording
+        (6, '已失败'),      # 处理失败
+    ]
+    recording_status = models.IntegerField(
+        choices=RECORDING_STATUS_CHOICES, 
+        default=0,
+        verbose_name="录音状态", 
+        help_text="实时录音状态"
+    )
+    
+    # 临时音频文件路径
+    temp_audio_path = models.CharField(
+        max_length=500, 
+        blank=True, 
+        null=True,
+        verbose_name="临时音频文件路径", 
+        help_text="WebM格式的临时录音文件路径"
+    )
+    
+    # 暂停/恢复记录
+    pause_count = models.IntegerField(
+        default=0,
+        verbose_name="暂停次数", 
+        help_text="用户暂停录音的次数"
+    )
+    
+    last_pause_time = models.DateTimeField(
+        blank=True, 
+        null=True,
+        verbose_name="最后暂停时间", 
+        help_text="最后一次暂停的时间"
+    )
+    
+    last_resume_time = models.DateTimeField(
+        blank=True, 
+        null=True,
+        verbose_name="最后恢复时间", 
+        help_text="最后一次恢复录音的时间"
+    )
+    
+    # 开始和结束时间
+    started_at = models.DateTimeField(
+        blank=True, 
+        null=True,
+        verbose_name="开始录音时间", 
+        help_text="第一次开始录音的时间"
+    )
+    
+    stopped_at = models.DateTimeField(
+        blank=True, 
+        null=True,
+        verbose_name="停止录音时间", 
+        help_text="最终停止录音的时间"
+    )
+    
+    # 关联的最终Recording（处理完成后）
+    recording = models.ForeignKey(
+        Recording, 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True,
+        related_name='realtime_session',
+        verbose_name="关联录音", 
+        help_text="处理完成后生成的Recording记录"
+    )
+    
+    # Celery任务ID（用于跟踪后台处理任务）
+    task_id = models.CharField(
+        max_length=100, 
+        blank=True, 
+        null=True,
+        verbose_name="后台任务ID", 
+        help_text="Celery任务ID"
+    )
+    
+    # 错误信息
+    error_message = models.TextField(
+        blank=True, 
+        null=True,
+        verbose_name="错误信息", 
+        help_text="处理失败时的错误信息"
+    )
+    
+    # 音频元数据（可选，用于统计）
+    audio_duration = models.IntegerField(
+        default=0,
+        verbose_name="录音时长", 
+        help_text="累计录音时长（秒，不包括暂停时间）"
+    )
+    
+    audio_size = models.BigIntegerField(
+        default=0,
+        verbose_name="音频大小", 
+        help_text="临时音频文件大小（字节）"
+    )
+    
+    def can_start_recording(self):
+        """检查是否可以开始录音"""
+        if self.recording_status in [0]:  # 未开始
+            return True, "可以开始录音"
+        elif self.recording_status == 2:  # 已暂停
+            return False, "当前处于暂停状态，请使用恢复录音"
+        else:
+            return False, f"当前状态({self.get_recording_status_display()})不允许开始录音"
+    
+    def can_pause_recording(self):
+        """检查是否可以暂停录音"""
+        if self.recording_status == 1:  # 录音中
+            return True, "可以暂停录音"
+        return False, f"当前状态({self.get_recording_status_display()})不允许暂停"
+    
+    def can_resume_recording(self):
+        """检查是否可以恢复录音"""
+        if self.recording_status == 2:  # 已暂停
+            return True, "可以恢复录音"
+        return False, f"当前状态({self.get_recording_status_display()})不允许恢复"
+    
+    def can_stop_recording(self):
+        """检查是否可以停止录音"""
+        if self.recording_status in [1, 2]:  # 录音中或已暂停
+            return True, "可以停止录音"
+        return False, f"当前状态({self.get_recording_status_display()})不允许停止"
+    
+    def start_recording(self):
+        """开始录音"""
+        self.recording_status = 1
+        if not self.started_at:
+            self.started_at = timezone.now()
+        self.save(update_fields=['recording_status', 'started_at', 'update_datetime'])
+    
+    def pause_recording(self):
+        """暂停录音"""
+        self.recording_status = 2
+        self.pause_count += 1
+        self.last_pause_time = timezone.now()
+        self.save(update_fields=['recording_status', 'pause_count', 'last_pause_time', 'update_datetime'])
+    
+    def resume_recording(self):
+        """恢复录音"""
+        self.recording_status = 1
+        self.last_resume_time = timezone.now()
+        self.save(update_fields=['recording_status', 'last_resume_time', 'update_datetime'])
+    
+    def stop_recording(self, task_id=None):
+        """停止录音"""
+        self.recording_status = 3
+        self.stopped_at = timezone.now()
+        if task_id:
+            self.task_id = task_id
+        self.save(update_fields=['recording_status', 'stopped_at', 'task_id', 'update_datetime'])
+    
+    def update_audio_info(self):
+        """更新音频文件信息"""
+        if self.temp_audio_path and os.path.exists(self.temp_audio_path):
+            self.audio_size = os.path.getsize(self.temp_audio_path)
+            self.save(update_fields=['audio_size', 'update_datetime'])
+    
+    def mark_processing(self):
+        """标记为处理中"""
+        self.recording_status = 4
+        self.save(update_fields=['recording_status', 'update_datetime'])
+    
+    def mark_completed(self, recording):
+        """标记为已完成"""
+        self.recording_status = 5
+        self.recording = recording
+        self.save(update_fields=['recording_status', 'recording', 'update_datetime'])
+    
+    def mark_failed(self, error_message):
+        """标记为失败"""
+        self.recording_status = 6
+        self.error_message = error_message
+        self.save(update_fields=['recording_status', 'error_message', 'update_datetime'])
+    
+    class Meta:
+        db_table = "meet_realtime_recording_session"
+        verbose_name = "实时录音会话"
+        verbose_name_plural = verbose_name
+        ordering = ['-create_datetime']
+        indexes = [
+            models.Index(fields=['session_id']),
+            models.Index(fields=['meeting', 'recording_status']),
+        ]
+    
+    def __str__(self):
+        return f"{self.meeting.title} - {self.get_recording_status_display()}"

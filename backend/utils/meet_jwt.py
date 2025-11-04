@@ -1,20 +1,25 @@
+import datetime
+import json
 from typing import Union
 from simplejwt import util
 from simplejwt.jwt import default_alg, _hash, Jwt
-import datetime
-import json
+from django.utils import timezone
 
 
 class DateEncoder(json.JSONEncoder):
-	def default(self, obj):
-		if isinstance(obj, datetime.datetime):
-			return obj.strftime("%Y-%m-%d %H:%M:%S")
-		elif isinstance(obj, datetime.date):
-			return obj.strftime("%Y-%m-%d")
-		elif isinstance(obj, datetime.time):
-			return obj.strftime("%H:%M:%S")
-		else:
-			return json.JSONEncoder.default(self, obj)
+    def default(self, obj):
+        if isinstance(obj, datetime.datetime):
+            # 如果是带时区的 datetime，转换为本地时区
+            if timezone.is_aware(obj):
+                obj = timezone.localtime(obj)
+            # 使用 ISO 8601 格式（带 T）
+            return obj.strftime("%Y-%m-%dT%H:%M:%S")
+        elif isinstance(obj, datetime.date):
+            return obj.strftime("%Y-%m-%d")
+        elif isinstance(obj, datetime.time):
+            return obj.strftime("%H:%M:%S")
+        else:
+            return json.JSONEncoder.default(self, obj)
 
 class MeetJwt(Jwt):
 
