@@ -331,10 +331,8 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
             except Exception:
                 pass  # 连接可能已关闭
 
-
-
     async def handle_audio_data(self, audio_bytes):
-        """接收音频数据并立即持久化"""
+        """音频数据写盘"""
         if not self.transcription_active:
             return
         
@@ -400,28 +398,7 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
 
     async def _handle_audio_error(self, error_msg: str):
         """处理音频错误回调"""
-        await self.send_error(error_msg)
-    
-    async def real_time_transcribe(self, audio_bytes):
-        """实时转录 - 真实实现"""
-        try:
-            # 将音频数据写入临时文件
-            temp_audio_file = os.path.join(self.temp_dir, f'chunk_{len(self.audio_segments)}.webm')
-            with open(temp_audio_file, 'wb') as f:
-                f.write(audio_bytes)
-            
-            # 调用流式转录服务
-            result = await asyncio.get_event_loop().run_in_executor(
-                None, 
-                self._transcribe_audio_chunk, 
-                temp_audio_file
-            )
-            
-            if result:
-                await self.send_transcription_result(result)
-                
-        except Exception as e:
-            logger.error(f"实时转录失败: {e}")
+        await self.send_error(error_msg) 
     
     def _transcribe_audio_chunk(self, audio_file):
         """转录音频块 - 同步方法在线程池中执行"""
@@ -565,33 +542,6 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
                 shutil.rmtree(self.temp_dir)
         except Exception as e:
             logger.error(f"资源清理失败: {e}")
-    
-    # async def start_transcription_session(self, meeting_id):
-    #     """开始转录会话"""
-    #     try:
-    #         # 验证会议存在
-    #         meeting = await self.get_meeting(meeting_id)
-    #         if not meeting:
-    #             await self.send_error("会议不存在")
-    #             return
-            
-    #         # 设置状态
-    #         self.transcription_active = True  # ← 设置状态
-    #         self.meeting_id = meeting_id
-            
-    #         await self.send(text_data=json.dumps({
-    #             'type': 'transcription_started',
-    #             'session_id': self.session_id,
-    #             'meeting_id': meeting_id,
-    #             'meeting_title': meeting.title,
-    #             'timestamp': datetime.datetime.now().isoformat()
-    #         }))
-            
-    #         logger.info(f"会话 {self.session_id} 开始转录，会议ID: {meeting_id}")
-            
-    #     except Exception as e:
-    #         logger.error(f"启动转录会话失败: {e}")
-    #         await self.send_error(f"启动失败: {str(e)}")
     
     async def stop_transcription_session(self):
         """停止转录会话"""
