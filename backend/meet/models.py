@@ -94,15 +94,41 @@ class Meeting(CoreModel):
 
     def can_upload_recording(self):
         """检查是否可以上传录音"""
-        # 1. 检查会议状态
         if self.status in [2, 3]:  # 已结束或已取消
             return False, "会议已结束或已取消，无法上传录音"
         
-        # 2. 检查是否已有录音
+        if self.delete_status != 0:
+            return False, "会议已删除，无法上传录音"
+        
         if self.recordings.filter(process_status__in=[0, 1, 2]).exists():
             return False, "该会议已有录音文件，无法上传新录音"
         
+        # 检查是否有活跃的实时录音会话
+        if hasattr(self, 'realtime_session'):
+            session = self.realtime_session
+            # 状态 0-4: 未开始/录音中/已暂停/已停止/处理中
+            if session.recording_status in [0, 1, 2, 3, 4]:
+                return False, "该会议正在进行实时录音，无法上传录音文件"
+        
         return True, "可以上传录音"
+
+    def can_start_realtime_recording(self):
+        """检查是否可以开启实时录音"""
+
+        if self.status in [2, 3]:  # 已完成或已取消
+            return False, "会议已结束或已取消，无法开启实时录音"
+    
+        if self.delete_status != 0:
+            return False, "会议已删除，无法上传录音"
+        
+        if self.recordings.filter(process_status=2).exists():
+            return False, "该会议已有处理完成的录音文件，无法开启实时录音"
+        
+        if self.recordings.filter(process_status__in=[0, 1]).exists():  # 未处理或处理中
+            return False, "该会议正在处理录音文件，无法开启实时录音"       
+       
+        
+        return True, "可以开启实时录音"
     
     def get_recording(self):
         """获取会议的唯一录音文件"""

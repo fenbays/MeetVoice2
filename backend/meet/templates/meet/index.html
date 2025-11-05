@@ -1128,14 +1128,31 @@
                         
                     case 'resume':
                         if (msgStatus === 'success') {
-                            console.log('录音已恢复');
-                            updateRecordingUI(RecordingState.RECORDING);
-                            if (!animationFrame) {
-                                drawWaveform();
+                            if (msgData && msgData.stage === 'initializing') {
+                                // 显示加载状态
+                                console.log('正在准备恢复录音...');
+                                showInitializationOverlay();
+                                updateLoadingUI('loading_models', '正在加载AI模型...');
+                            } else if (msgData && msgData.stage === 'ready') {
+                                // 准备完成，才更新UI为录音状态
+                                console.log('录音已恢复');
+                                hideInitializationOverlay();
+                                updateRecordingUI(RecordingState.RECORDING);
+                                if (!animationFrame) {
+                                    drawWaveform();
+                                }
+                            } else {
+                                // 其他中间状态或旧版本兼容
+                                console.log('恢复录音中:', message);
+                                updateRecordingUI(RecordingState.RECORDING);
+                                if (!animationFrame) {
+                                    drawWaveform();
+                                }
                             }
                         } else if (msgStatus === 'warning') {
                             showWarning(message);
                         } else if (msgStatus === 'error') {
+                            hideInitializationOverlay();
                             showError(message);
                         }
                         break;
@@ -1247,7 +1264,7 @@
         async function setupWebSocket() {
             try {
                 updateLoadingUI('connecting', '正在连接服务器...');
-                const meetingId = '16';
+                const meetingId = '111';
                 const wsUrl = `ws://${window.location.host}/ws/transcribe/${meetingId}/`;
                 console.log('正在连接WebSocket:', wsUrl);
                 

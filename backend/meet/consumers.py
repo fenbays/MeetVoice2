@@ -27,9 +27,24 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
         self.meeting_id = self.scope['url_route']['kwargs']['meeting_id']
         self.room_group_name = f'transcribe_{self.meeting_id}'
         
-        # ← 从数据库获取或创建会话
-        self.session = await self._get_or_create_session()
-        self.session_id = self.session.session_id
+        # 创建会话
+        try:
+            self.session = await self._get_or_create_session()
+            self.session_id = self.session.session_id
+        except ValueError as e:
+            logger.warning(f"实时录音连接被拒绝: {str(e)}, meeting_id={self.meeting_id}")
+            await self.accept()
+            await self.send_response(
+                action='start',
+                status='warning',
+                message=str(e),
+                code='CANNOT_START',
+                data={
+                    
+                }
+            )
+            await self.close(code=4003)
+            return
         
         # 初始化状态（从数据库恢复）
         self.transcription_active = (self.session.recording_status == 1)  # 录音中
@@ -96,7 +111,7 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
     async def disconnect(self, close_code):
         """断开连接：只清理WebSocket相关资源"""
         self.connected = False
-        logger.info(f"会话 {self.session_id} 断开连接，close_code={close_code}")
+        logger.info(f"会议 {self.meeting_id} 断开连接，close_code={close_code}")
         
         # ← 新增：如果正在录音，自动暂停并保存状态（支持断线重连后继续）
         if hasattr(self, 'session') and self.session:
@@ -106,7 +121,7 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
                 
                 # 如果正在录音，自动暂停
                 if self.session.recording_status == 1:  # 录音中
-                    logger.info(f"会话 {self.session_id} 断开时正在录音，自动暂停")
+                    logger.info(f"会话 {self.meeting_id} 断开时正在录音，自动暂停")
                     
                     # 关闭文件句柄并刷新数据
                     if hasattr(self, 'audio_file_handle') and self.audio_file_handle:
@@ -120,7 +135,7 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
                     # 更新数据库状态为暂停
                     await self._session_pause_recording()
                     await self._session_update_audio_info()
-                    logger.info(f"会话 {self.session_id} 已自动暂停，用户可稍后重连继续录音")
+                    logger.info(f"会议 {self.meeting_id} 已自动暂停，用户可稍后重连继续录音")
             except Exception as e:
                 logger.error(f"保存会话状态失败: {e}")
         
@@ -147,7 +162,7 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
             self.channel_name
         )
         
-        logger.info(f"会话 {self.session_id} 清理完成")
+        logger.info(f"会话 {self.meeting_id} 清理完成")
     
     async def receive(self, text_data=None, bytes_data=None):
         """接收消息处理"""
@@ -232,7 +247,17 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
                     code='CANNOT_RESUME'
                 )
                 return
-            await self._handle_resume_transcription()
+            
+            # 立即响应，然后异步处理
+            await self.send_response(
+                action='resume',
+                status='success',
+                message='正在恢复录音...',
+                data={'stage': 'initializing'}
+            )
+            
+            # 异步执行恢复流程
+            asyncio.create_task(self._initialize_and_resume_processing())
         
         elif message_type == 'stop_transcription':
             can_stop, msg = await self._check_can_stop()
@@ -262,11 +287,28 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
                 code='UNSUPPORTED_TYPE'
             )
 
-    async def _initialize_and_start_processing(self):
+    async def _prepare_audio_processor(self, is_resume=False):
         """
-        初始化并启动音频处理
+        准备并启动 AudioProcessor
+        参数：
+            is_resume: 是否是恢复录音（影响进度消息的 action）
+        返回：
+            success: bool
         """
+        action_name = 'resume' if is_resume else 'start'
+        
         try:
+            # 检查 AudioProcessor 状态
+            if not hasattr(self, 'audio_processor') or not self.audio_processor:
+                raise Exception("AudioProcessor不可用")
+            
+            if self.audio_processor._state == "RUNNING":
+                logger.info("AudioProcessor已在运行")
+                return True
+            
+            if self.audio_processor._state == "STOPPED":
+                raise Exception("AudioProcessor已停止，无法重新启动")
+            
             # 1. 通知：模型正在准备
             await self.send_response(
                 action='model_loading',
@@ -274,8 +316,8 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
                 message='正在加载AI模型...',
                 data={'stage': 'loading', 'progress': 0}
             )
-
-             # 2. 定义进度回调
+            
+            # 2. 定义进度回调
             async def progress_callback(stage: str, message: str):
                 """模型加载进度回调"""
                 await self.send_response(
@@ -284,7 +326,7 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
                     message=message,
                     data={'stage': stage}
                 )
-
+            
             # 3. 带回调地加载模型
             logger.info("开始加载模型...")
             if hasattr(self.audio_processor, 'prepare_streaming_models'):
@@ -294,30 +336,57 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
                 if not success:
                     raise Exception("模型准备失败")
             else:
-                # 如果没有这个方法，直接失败别模拟
                 raise Exception("AudioProcessor 不支持流式模型")
             
             logger.info("模型加载完成")
             
-            # 4. 检查AudioProcessor
-            if not hasattr(self, 'audio_processor') or self.audio_processor is None:
-                raise Exception("AudioProcessor未初始化")
-            
-            # 5. 启动AudioProcessor（只调用一次）
+            # 4. 启动AudioProcessor
             logger.info("启动AudioProcessor...")
             self.results_generator = await self.audio_processor.create_tasks()
             
-            # 6. 启动结果处理任务
-            self.result_handler_task = asyncio.create_task(self._handle_results())
+            # 5. 启动结果处理任务
+            if not hasattr(self, 'result_handler_task') or self.result_handler_task.done():
+                self.result_handler_task = asyncio.create_task(self._handle_results())
+            
+            logger.info("AudioProcessor已启动，状态: RUNNING")
+            return True
+            
+        except Exception as e:
+            logger.error(f"准备AudioProcessor失败: {e}")
+            await self.send_response(
+                action=action_name,
+                status='error',
+                message=f'音频处理系统初始化失败: {str(e)}',
+                code='INIT_FAILED'
+            )
+            return False
 
-            # 7. 更新数据库状态为"录音中"
+    async def _initialize_and_start_processing(self):
+        """
+        初始化并启动音频处理（首次开始录音）
+        """
+        try:
+            # 立即响应
+            await self.send_response(
+                action='start',
+                status='success',
+                message='正在初始化音频处理系统...',
+                data={'stage': 'initializing'}
+            )
+            
+            # 准备并启动 AudioProcessor
+            success = await self._prepare_audio_processor(is_resume=False)
+            if not success:
+                return
+            
+            # 更新数据库状态为"录音中"
             await self._session_start_recording()
             
-            # 8. 设置转录激活标志
+            # 设置转录激活标志
             self.transcription_active = True
             self.is_paused = False
-
-            # 9. 发送完成消息
+            
+            # 发送完成消息
             await self.send_response(
                 action='start',
                 status='success',
@@ -338,15 +407,6 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
                 logger.error(f"更新失败状态到数据库失败: {db_error}")
             finally:
                 await self._cleanup_audio_processor()
-            
-            # 发送错误消息
-            await self.send_response(
-                action='start',
-                status='error',
-                message=f'初始化失败，请刷新页面重试: {str(e)}',
-                code='INIT_FAILED',
-                data={'stage': 'failed'}
-            )
 
     async def _handle_pause_transcription(self):
         """处理暂停"""
@@ -382,61 +442,46 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
             }
         )
 
-    async def _handle_resume_transcription(self):
-        """处理恢复"""
-        logger.info(f"恢复录音")
-        
+    async def _initialize_and_resume_processing(self):
+        """
+        初始化并恢复音频处理（恢复录音）
+        """
         try:
             # 1. 检查文件存在
             if not os.path.exists(self.temp_audio_file):
                 raise Exception(f"音频文件不存在: {self.temp_audio_file}")
-
-            # 检查 AudioProcessor 是否已启动
-            if hasattr(self, 'audio_processor') and self.audio_processor:
-                # 检查状态，如果不是 RUNNING，需要启动
-                if self.audio_processor._state != "RUNNING":
-                    logger.info("AudioProcessor未启动，正在启动...")
-                    
-                    # 加载模型（如果需要）
-                    if hasattr(self.audio_processor, 'prepare_streaming_models'):
-                        logger.info("准备流式模型...")
-                        success = await self.audio_processor.prepare_streaming_models()
-                        if not success:
-                            raise Exception("模型准备失败")
-                    
-                    # 启动 AudioProcessor
-                    logger.info("启动AudioProcessor...")
-                    self.results_generator = await self.audio_processor.create_tasks()
-                    
-                    # 启动结果处理任务
-                    self.result_handler_task = asyncio.create_task(self._handle_results())
-                    logger.info("AudioProcessor已启动")
-            else:
-                raise Exception("AudioProcessor不可用")
             
-            # 2. 以追加模式打开文件
+            # 2. 准备并启动 AudioProcessor
+            success = await self._prepare_audio_processor(is_resume=True)
+            if not success:
+                return
+            
+            # 3. 以追加模式打开文件
             self.audio_file_handle = open(self.temp_audio_file, 'ab')
             
-            # 3. 更新数据库状态
+            # 4. 更新数据库状态
             await self._session_resume_recording()
             
-            # 4. 设置内存标志
+            # 5. 设置内存标志
             self.is_paused = False
             self.transcription_active = True
             
-            # 5. 刷新session对象
+            # 6. 刷新session对象
             await self._refresh_session()
             
-            # 6. 响应前端
+            # 7. 发送完成消息（重要：只有这时前端才能开始发送音频）
             await self.send_response(
                 action='resume',
                 status='success',
-                message='录音已恢复',
+                message='录音已恢复，可以继续录音',
                 data={
+                    'stage': 'ready',  # 告诉前端已经准备好了
                     'pause_count': self.session.pause_count,
                     'audio_file_size': self.session.audio_size
                 }
             )
+            
+            logger.info("录音恢复完成")
             
         except Exception as e:
             logger.error(f"恢复录音失败: {e}")
@@ -879,6 +924,10 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
     def _get_or_create_session(self):
         """获取或创建实时录音会话"""
         meeting = Meeting.objects.get(id=self.meeting_id)
+                
+        can_start, message = meeting.can_start_realtime_recording()
+        if not can_start:
+           raise ValueError(message)           
         
      # ← 使用事务锁防止并发问题
         with transaction.atomic():
