@@ -48,44 +48,127 @@
             line-height: 1.6;
         }
 
-        /* 模式选择器样式 */
-        .mode-selector {
-            display: flex;
-            justify-content: center;
-            margin-bottom: 30px;
-            gap: 10px;
+        /* API文档样式 */
+        .api-docs {
+            max-width: 900px;
+            margin: 40px auto;
+            padding: 30px;
+            background: var(--chip-bg);
+            border-radius: 12px;
+            text-align: left;
+            border: 1px solid var(--border);
         }
 
-        .mode-btn {
-            padding: 10px 20px;
-            border: 2px solid var(--border);
-            background: var(--button-bg);
+        .api-docs h2 {
             color: var(--text);
-            border-radius: 25px;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            font-size: 14px;
-            font-weight: 500;
-        }
-
-        .mode-btn:hover {
-            border-color: rgb(209, 61, 53);
-        }
-
-        .mode-btn.active {
-            background: rgb(209, 61, 53);
-            color: white;
-            border-color: rgb(209, 61, 53);
-        }
-
-        /* 模式区域样式 */
-        .mode-section {
-            display: none;
+            margin-top: 0;
+            margin-bottom: 20px;
+            font-size: 24px;
             text-align: center;
         }
 
-        .mode-section.active {
+        .api-docs h3 {
+            color: var(--text);
+            margin-top: 30px;
+            margin-bottom: 15px;
+            font-size: 18px;
+            border-bottom: 2px solid var(--border);
+            padding-bottom: 8px;
+        }
+
+        .api-docs h4 {
+            color: var(--text);
+            margin-top: 20px;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .api-docs p {
+            color: var(--muted);
+            line-height: 1.8;
+            margin: 10px 0;
+        }
+
+        .api-docs code {
+            background: var(--button-bg);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            color: rgb(209, 61, 53);
+            font-size: 14px;
+        }
+
+        .api-docs pre {
+            background: var(--button-bg);
+            padding: 15px;
+            border-radius: 8px;
+            overflow-x: auto;
+            border: 1px solid var(--border);
+            margin: 15px 0;
+        }
+
+        .api-docs pre code {
+            background: none;
+            padding: 0;
+            color: var(--text);
             display: block;
+            line-height: 1.6;
+        }
+
+        .api-docs ul {
+            color: var(--muted);
+            line-height: 1.8;
+            padding-left: 20px;
+        }
+
+        .api-docs li {
+            margin: 8px 0;
+        }
+
+        .api-docs table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+        }
+
+        .api-docs th,
+        .api-docs td {
+            padding: 10px;
+            border: 1px solid var(--border);
+            text-align: left;
+        }
+
+        .api-docs th {
+            background: var(--button-bg);
+            color: var(--text);
+            font-weight: 600;
+        }
+
+        .api-docs td {
+            color: var(--muted);
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .status-badge.success {
+            background: rgba(76, 175, 80, 0.1);
+            color: #4CAF50;
+        }
+
+        .status-badge.warning {
+            background: rgba(255, 152, 0, 0.1);
+            color: #FF9800;
+        }
+
+        .status-badge.error {
+            background: rgba(244, 67, 54, 0.1);
+            color: #F44336;
         }
 
         /* 录音按钮样式 */
@@ -165,95 +248,6 @@
             margin-left: 10px;
         }
 
-        /* 上传区域样式 */
-        .upload-area {
-            border: 2px dashed var(--border);
-            border-radius: 12px;
-            padding: 40px;
-            margin: 20px auto;
-            max-width: 500px;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            background: var(--chip-bg);
-        }
-
-        .upload-area:hover {
-            border-color: rgb(209, 61, 53);
-            background: var(--loading-bg);
-        }
-
-        .upload-area.dragover {
-            border-color: rgb(209, 61, 53);
-            background: var(--loading-bg);
-        }
-
-        .upload-icon {
-            font-size: 48px;
-            margin-bottom: 20px;
-        }
-
-        .upload-text p {
-            margin: 5px 0;
-            color: var(--text);
-        }
-
-        .upload-hint {
-            font-size: 12px;
-            color: var(--muted);
-        }
-
-        /* 关键词输入样式 */
-        .keywords-input {
-            max-width: 500px;
-            margin: 20px auto;
-            text-align: left;
-        }
-
-        .keywords-input label {
-            display: block;
-            margin-bottom: 5px;
-            font-weight: 500;
-            color: var(--text);
-        }
-
-        .keywords-input input {
-            width: 100%;
-            padding: 10px;
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            background: var(--button-bg);
-            color: var(--text);
-            font-size: 14px;
-            box-sizing: border-box;
-        }
-
-        .keywords-input input:focus {
-            outline: none;
-            border-color: rgb(209, 61, 53);
-        }
-
-        /* 上传按钮样式 */
-        .upload-btn {
-            padding: 12px 30px;
-            border: none;
-            border-radius: 25px;
-            background: rgb(209, 61, 53);
-            color: white;
-            cursor: pointer;
-            font-size: 16px;
-            font-weight: 500;
-            transition: all 0.3s ease;
-            margin-top: 20px;
-        }
-
-        .upload-btn:hover:not(:disabled) {
-            background: rgb(189, 41, 33);
-        }
-
-        .upload-btn:disabled {
-            background: var(--muted);
-            cursor: not-allowed;
-        }
 
         #status {
             margin-top: 20px;
@@ -476,14 +470,10 @@
 </head>
 <body>
     <div class="container">
-        <!-- 模式选择器 -->
-        <div class="mode-selector">
-            <button id="recordModeBtn" class="mode-btn active">实时录音</button>
-            <button id="uploadModeBtn" class="mode-btn">上传文件</button>
-        </div>
-
+        <h1 style="text-align: center; margin-bottom: 30px;">实时语音转录</h1>
+        
         <!-- 实时录音界面 -->
-        <div id="recordMode" class="mode-section active">
+        <div id="recordMode">
             <button id="recordButton">
                 <div class="shape-container">
                     <div class="shape"></div>
@@ -501,26 +491,6 @@
                 <button id="pauseButton" class="control-btn">⏸ 暂停</button>
                 <button id="stopButton" class="control-btn stop-btn">⏹ 停止</button>
             </div>
-        </div>
-
-        <!-- 文件上传界面 -->
-        <div id="uploadMode" class="mode-section">
-            <div class="upload-area" id="uploadArea">
-                <div class="upload-icon">📁</div>
-                <div class="upload-text">
-                    <p>点击选择音频文件或拖拽文件到此处</p>
-                    <p class="upload-hint">支持 MP3, WAV, WebM, OGG, M4A, FLAC 格式，最大100MB</p>
-                </div>
-                <input type="file" id="fileInput" accept=".mp3,.wav,.webm,.ogg,.m4a,.flac" style="display: none;">
-            </div>
-            
-            <!-- 可选的关键词输入 -->
-            <div class="keywords-input">
-                <label for="keywordsField">关键词 (可选):</label>
-                <input type="text" id="keywordsField" placeholder="输入专有名词或关键词，用逗号分隔">
-            </div>
-            
-            <button id="uploadButton" class="upload-btn" disabled>开始处理</button>
         </div>
 
         <p id="status">点击按钮开始录音</p>
@@ -542,6 +512,240 @@
                 <a id="audioDownload" href="#" download style="display: none;">下载处理后的音频</a>
                 <span id="noAudio" style="display: none;">暂无处理后的音频文件</span>
             </div>
+        </div>
+
+        <!-- API 调用文档 -->
+        <div class="api-docs">
+            <h2>📡 WebSocket 实时转录接口文档</h2>
+            
+            <h3>接口地址</h3>
+            <pre><code>ws://${host}/ws/transcribe/${meeting_id}/</code></pre>
+            <p><strong>参数：</strong></p>
+            <ul>
+                <li><code>host</code>: 服务器地址（例如：localhost:8000）</li>
+                <li><code>meeting_id</code>: 会议ID（字符串/数字）</li>
+            </ul>
+
+            <h3>连接示例</h3>
+            <pre><code>const wsUrl = `ws://${window.location.host}/ws/transcribe/111/`;
+const websocket = new WebSocket(wsUrl);
+
+websocket.onopen = () => {
+    console.log('WebSocket已连接');
+};
+
+websocket.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    console.log('收到消息:', data);
+};</code></pre>
+
+            <h3>客户端消息类型（发送到服务器）</h3>
+            
+            <h4>1. 开始录音</h4>
+            <pre><code>{
+    "type": "start_transcription"
+}</code></pre>
+            <p>启动录音会话，服务器会初始化音频处理系统并加载AI模型。</p>
+
+            <h4>2. 暂停录音</h4>
+            <pre><code>{
+    "type": "pause_transcription"
+}</code></pre>
+            <p>暂停当前录音，音频文件会保存，可以稍后恢复。</p>
+
+            <h4>3. 恢复录音</h4>
+            <pre><code>{
+    "type": "resume_transcription"
+}</code></pre>
+            <p>恢复之前暂停的录音，继续追加音频数据。</p>
+
+            <h4>4. 停止录音</h4>
+            <pre><code>{
+    "type": "stop_transcription"
+}</code></pre>
+            <p>停止录音并触发后台处理（说话人分离、转录等）。</p>
+
+            <h4>5. 音频数据（二进制）</h4>
+            <pre><code>// 直接发送音频 Blob 数据
+const recorder = new MediaRecorder(stream, {
+    mimeType: 'audio/webm;codecs=opus',
+    audioBitsPerSecond: 128000
+});
+
+recorder.ondataavailable = (e) => {
+    if (e.data.size > 0) {
+        websocket.send(e.data);  // 发送二进制数据
+    }
+};
+
+recorder.start(5000);  // 每5秒发送一次</code></pre>
+
+            <h3>服务器消息格式</h3>
+            <p>所有服务器消息都采用统一格式：</p>
+            <pre><code>{
+    "type": "response",
+    "action": "string",
+    "status": "success | warning | error",
+    "message": "string",
+    "code": "string (可选)",
+    "session_id": "string",
+    "data": {}
+}</code></pre>
+
+            <h3>主要响应类型</h3>
+            
+            <h4>连接成功 (<code>action: 'connect'</code>)</h4>
+            <pre><code>{
+    "action": "connect",
+    "status": "success",
+    "data": {
+        "recording_status": 0,  // 0=未开始, 1=录音中, 2=已暂停
+        "can_resume": false,
+        "pause_count": 0,
+        "audio_size": 0
+    }
+}</code></pre>
+
+            <h4>模型加载进度 (<code>action: 'model_loading'</code>)</h4>
+            <pre><code>{
+    "action": "model_loading",
+    "status": "success",
+    "message": "正在加载AI模型...",
+    "data": {
+        "stage": "loading"
+    }
+}</code></pre>
+
+            <h4>开始录音响应 (<code>action: 'start'</code>)</h4>
+            <pre><code>// 准备完成
+{
+    "action": "start",
+    "status": "success",
+    "message": "音频处理系统已就绪",
+    "data": {
+        "stage": "ready",
+        "recording_status": 1
+    }
+}</code></pre>
+
+            <h4>实时转录结果 (<code>action: 'transcription'</code>)</h4>
+            <pre><code>{
+    "action": "transcription",
+    "status": "success",
+    "data": {
+        "text": "转录的文本内容",
+        "confidence": 0.95,
+        "timestamp": "2025-11-05T10:30:00",
+        "is_final": false
+    }
+}</code></pre>
+
+            <h4>离线处理完成 (<code>action: 'offline_processing'</code>)</h4>
+            <pre><code>{
+    "action": "offline_processing",
+    "status": "success",
+    "data": {
+        "stage": "completed",
+        "result": {
+            "audio_url": "/media/processed/111/audio.wav",
+            "speakers_count": 2,
+            "transcription": "完整转录文本...",
+            "speakers_info": [...]
+        }
+    }
+}</code></pre>
+
+            <h3>录音状态说明</h3>
+            <table>
+                <tr>
+                    <th>状态值</th>
+                    <th>说明</th>
+                    <th>可执行操作</th>
+                </tr>
+                <tr>
+                    <td><code>0</code></td>
+                    <td>未开始</td>
+                    <td>start</td>
+                </tr>
+                <tr>
+                    <td><code>1</code></td>
+                    <td>录音中</td>
+                    <td>pause, stop</td>
+                </tr>
+                <tr>
+                    <td><code>2</code></td>
+                    <td>已暂停</td>
+                    <td>resume, stop</td>
+                </tr>
+                <tr>
+                    <td><code>3</code></td>
+                    <td>已停止</td>
+                    <td>等待处理</td>
+                </tr>
+                <tr>
+                    <td><code>4</code></td>
+                    <td>处理中</td>
+                    <td>等待完成</td>
+                </tr>
+                <tr>
+                    <td><code>5</code></td>
+                    <td>已完成</td>
+                    <td>-</td>
+                </tr>
+                <tr>
+                    <td><code>6</code></td>
+                    <td>已失败</td>
+                    <td>-</td>
+                </tr>
+            </table>
+
+            <h3>音频格式要求</h3>
+            <ul>
+                <li><strong>推荐格式：</strong> <code>audio/webm;codecs=opus</code></li>
+                <li><strong>采样率：</strong> 16000 Hz</li>
+                <li><strong>声道数：</strong> 1（单声道）</li>
+                <li><strong>比特率：</strong> 128000 bps</li>
+                <li><strong>发送频率：</strong> 建议每5秒发送一次音频数据块</li>
+            </ul>
+
+            <h3>常见错误码</h3>
+            <ul>
+                <li><code>CANNOT_START</code>: 无法开始录音（可能需要先恢复）</li>
+                <li><code>CANNOT_PAUSE</code>: 无法暂停（当前状态不允许）</li>
+                <li><code>CANNOT_RESUME</code>: 无法恢复（没有可恢复的录音）</li>
+                <li><code>CANNOT_STOP</code>: 无法停止（当前状态不允许）</li>
+                <li><code>INIT_FAILED</code>: 初始化失败</li>
+                <li><code>RESUME_FAILED</code>: 恢复失败</li>
+                <li><code>AUDIO_PROCESSING_ERROR</code>: 音频处理错误</li>
+            </ul>
+
+            <h3>完整使用流程</h3>
+            <pre><code>// 1. 建立连接
+const websocket = new WebSocket(wsUrl);
+
+// 2. 连接成功后发送开始命令
+websocket.onopen = () => {
+    websocket.send(JSON.stringify({
+        type: 'start_transcription'
+    }));
+};
+
+// 3. 等待模型加载完成（监听 action: 'start', stage: 'ready'）
+// 4. 开始发送音频数据
+// 5. 接收实时转录结果（action: 'transcription'）
+// 6. 需要暂停时发送 pause_transcription
+// 7. 需要恢复时发送 resume_transcription
+// 8. 完成时发送 stop_transcription
+// 9. 等待离线处理完成（action: 'offline_processing'）</code></pre>
+
+            <h3>注意事项</h3>
+            <ul>
+                <li>首次启动需要加载AI模型，可能需要几秒到几十秒</li>
+                <li>断线重连后，如果 <code>recording_status=2</code>，可以通过 <code>resume</code> 继续录音</li>
+                <li>只在 <code>recording_status=1</code> 时发送音频数据</li>
+                <li>所有响应都包含 <code>status</code> 字段（success/warning/error）</li>
+                <li>停止录音后，服务器会自动进行说话人分离和完整转录</li>
+            </ul>
         </div>
         
         <!-- 初始化/处理遮罩 -->
@@ -575,26 +779,12 @@
         const waveCanvas = document.getElementById('waveCanvas');
         const waveCtx = waveCanvas.getContext('2d');
         const timerElement = document.querySelector('.timer');
-
-        // 新增：上传相关元素
-        const recordModeBtn = document.getElementById('recordModeBtn');
-        const uploadModeBtn = document.getElementById('uploadModeBtn');
-        const recordMode = document.getElementById('recordMode');
-        const uploadMode = document.getElementById('uploadMode');
-        const uploadArea = document.getElementById('uploadArea');
-        const fileInput = document.getElementById('fileInput');
-        const uploadButton = document.getElementById('uploadButton');
-        const keywordsField = document.getElementById('keywordsField');
         const results = document.getElementById('results');
 
-        // 新增：控制按钮元素
+        // 控制按钮元素
         const pauseButton = document.getElementById('pauseButton');
         const stopButton = document.getElementById('stopButton');
         const recordingControls = document.getElementById('recordingControls');
-
-        // 当前模式和选中文件
-        let currentMode = 'record'; // 'record' 或 'upload'
-        let selectedFile = null;
 
         // 录音状态枚举（扩展）
         const RecordingState = {
@@ -619,269 +809,6 @@
         };
 
         let connectionState = ConnectionState.DISCONNECTED;
-
-        // 处理步骤枚举
-        const ProcessingSteps = {
-            UPLOADING: { text: '正在上传文件...', progress: 20 },
-            PROCESSING: { text: '正在处理音频...', progress: 40 },
-            SEPARATING: { text: '正在分离说话人...', progress: 60 },
-            TRANSCRIBING: { text: '正在转录文本...', progress: 80 },
-            COMPLETED: { text: '处理完成', progress: 100 }
-        };
-
-        // 初始化步骤枚举
-        // const InitializationSteps = {
-        //     CONNECTING_WEBSOCKET: { text: '正在连接服务器...', progress: 30 },
-        //     LOADING_MODELS: { text: '正在加载AI模型...', progress: 60 },
-        //     INITIALIZING_AUDIO: { text: '正在初始化音频...', progress: 80 },
-        //     READY: { text: '准备就绪', progress: 100 }
-        // };
-
-        // 模式切换功能
-        recordModeBtn.addEventListener('click', () => switchMode('record'));
-        uploadModeBtn.addEventListener('click', () => switchMode('upload'));
-
-        function switchMode(mode) {
-            currentMode = mode;
-            
-            // 更新按钮状态
-            recordModeBtn.classList.toggle('active', mode === 'record');
-            uploadModeBtn.classList.toggle('active', mode === 'upload');
-            
-            // 更新界面显示
-            recordMode.classList.toggle('active', mode === 'record');
-            uploadMode.classList.toggle('active', mode === 'upload');
-            
-            // 更新状态文本
-            if (mode === 'record') {
-                status.textContent = '点击按钮开始录音';
-                results.style.display = 'none';
-            } else {
-                status.textContent = '选择音频文件开始处理';
-                results.style.display = 'none';
-            }
-            
-            // 重置转录显示
-            transcription.innerHTML = '';
-        }
-
-        // 文件上传功能
-        uploadArea.addEventListener('click', () => {
-            fileInput.click();
-        });
-
-        uploadArea.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            uploadArea.classList.add('dragover');
-        });
-
-        uploadArea.addEventListener('dragleave', (e) => {
-            e.preventDefault();
-            uploadArea.classList.remove('dragover');
-        });
-
-        uploadArea.addEventListener('drop', (e) => {
-            e.preventDefault();
-            uploadArea.classList.remove('dragover');
-            
-            const files = e.dataTransfer.files;
-            if (files.length > 0) {
-                handleFileSelection(files[0]);
-            }
-        });
-
-        fileInput.addEventListener('change', (e) => {
-            if (e.target.files.length > 0) {
-                handleFileSelection(e.target.files[0]);
-            }
-        });
-
-        function handleFileSelection(file) {
-            // 验证文件类型
-            const allowedTypes = ['audio/mp3', 'audio/wav', 'audio/webm', 'audio/ogg', 'audio/m4a', 'audio/flac', 'audio/mpeg'];
-            const allowedExtensions = ['.mp3', '.wav', '.webm', '.ogg', '.m4a', '.flac'];
-            
-            const fileExtension = '.' + file.name.split('.').pop().toLowerCase();
-            
-            if (!allowedTypes.includes(file.type) && !allowedExtensions.includes(fileExtension)) {
-                status.textContent = '不支持的文件格式。请选择 MP3, WAV, WebM, OGG, M4A 或 FLAC 格式的音频文件。';
-                return;
-            }
-            
-            // 验证文件大小 (100MB)
-            const maxSize = 100 * 1024 * 1024;
-            if (file.size > maxSize) {
-                status.textContent = '文件太大，最大支持100MB。';
-                return;
-            }
-            
-            selectedFile = file;
-            uploadButton.disabled = false;
-            status.textContent = `已选择文件: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`;
-            
-            // 更新上传区域显示
-            uploadArea.querySelector('.upload-text p').textContent = `已选择: ${file.name}`;
-        }
-
-        uploadButton.addEventListener('click', () => {
-            if (selectedFile) {
-                startFileProcessing();
-            }
-        });
-
-        // 处理遮罩显示/隐藏函数
-        function showProcessingOverlay() {
-            const overlay = document.getElementById('initializationOverlay');
-            overlay.classList.remove('hidden');
-        }
-
-        function hideProcessingOverlay() {
-            const overlay = document.getElementById('initializationOverlay');
-            overlay.classList.add('hidden');
-        }
-
-        function updateProcessingProgress(step) {
-            const statusEl = document.getElementById('initializationStatus');
-            const progressFill = document.getElementById('progressFill');
-            const progressText = document.getElementById('progressText');
-            
-            statusEl.textContent = step.text;
-            progressFill.style.width = step.progress + '%';
-            progressText.textContent = step.progress + '%';
-        }
-
-        // 文件处理函数
-        async function startFileProcessing() {
-            if (!selectedFile) return;
-            
-            try {
-                showProcessingOverlay();
-                updateProcessingProgress(ProcessingSteps.UPLOADING);
-                
-                // 1. 上传文件
-                const formData = new FormData();
-                formData.append('audio_file', selectedFile);
-                formData.append('meeting_id', '1'); // 固定使用会议ID 1
-                formData.append('keywords', keywordsField.value || '');
-                
-                const response = await fetch('/api/transcription/upload/', {
-                    method: 'POST',
-                    headers: {
-                        'X-CSRFToken': getCookie('csrftoken')
-                    },
-                    body: formData
-                });
-                
-                if (!response.ok) {
-                    const errorData = await response.json().catch(() => ({}));
-                    throw new Error(errorData.error || `上传失败: ${response.status}`);
-                }
-                
-                const data = await response.json();
-                console.log('文件上传成功:', data);
-                
-                updateProcessingProgress(ProcessingSteps.PROCESSING);
-                
-                // 2. 轮询处理状态
-                await pollProcessingStatus(data.recording_id);
-                
-            } catch (error) {
-                console.error('文件处理失败:', error);
-                hideProcessingOverlay();
-                status.textContent = `处理失败: ${error.message}`;
-            }
-        }
-
-        async function pollProcessingStatus(recordingId) {
-            const pollInterval = 2000; // 2秒轮询一次
-            const maxPolls = 150; // 最多轮询5分钟
-            let pollCount = 0;
-            
-            return new Promise((resolve, reject) => {
-                const poll = async () => {
-                    try {
-                        const response = await fetch(`/api/transcription/status/${recordingId}/`);
-                        if (!response.ok) {
-                            throw new Error(`状态查询失败: ${response.status}`);
-                        }
-                        
-                        const data = await response.json();
-                        console.log('处理状态:', data);
-                        
-                        // 更新进度显示
-                        switch(data.process_status) {
-                            case 0: // 未处理
-                                updateProcessingProgress(ProcessingSteps.PROCESSING);
-                                break;
-                            case 1: // 处理中
-                                updateProcessingProgress(ProcessingSteps.TRANSCRIBING);
-                                break;
-                            case 2: // 已完成
-                                hideProcessingOverlay();
-                                showFileResults(data);
-                                status.textContent = '文件处理完成';
-                                resolve(data);
-                                return;
-                            case 3: // 处理失败
-                                hideProcessingOverlay();
-                                status.textContent = `处理失败: ${data.error || '未知错误'}`;
-                                reject(new Error(data.error || '处理失败'));
-                                return;
-                        }
-                        
-                        pollCount++;
-                        if (pollCount >= maxPolls) {
-                            hideProcessingOverlay();
-                            status.textContent = '处理超时，请刷新页面查看状态';
-                            reject(new Error('处理超时'));
-                            return;
-                        }
-                        
-                        // 继续轮询
-                        setTimeout(poll, pollInterval);
-                        
-                    } catch (error) {
-                        hideProcessingOverlay();
-                        status.textContent = `状态查询失败: ${error.message}`;
-                        reject(error);
-                    }
-                };
-                
-                poll();
-            });
-        }
-
-        function showFileResults(result) {
-            // 显示结果区域
-            results.style.display = 'block';
-            
-            // 更新结果内容
-            document.getElementById('speakersCount').textContent = result.speakers_count || 0;
-            document.getElementById('transcriptionText').textContent = result.transcription || '无转录内容';
-            
-            // 处理音频下载链接
-            if (result.processed_audio_url) {
-                const audioDownload = document.getElementById('audioDownload');
-                audioDownload.href = result.processed_audio_url;
-                audioDownload.style.display = 'inline-block';
-                document.getElementById('noAudio').style.display = 'none';
-            } else {
-                document.getElementById('audioDownload').style.display = 'none';
-                document.getElementById('noAudio').style.display = 'inline-block';
-            }
-            
-            // 显示详细的说话人和分段信息
-            if (result.speakers && result.speakers.length > 0) {
-                console.log('说话人信息:', result.speakers);
-            }
-            
-            if (result.segments && result.segments.length > 0) {
-                console.log('转录分段:', result.segments);
-            }
-            
-            // 滚动到结果区域
-            results.scrollIntoView({ behavior: 'smooth' });
-        }
 
         // 设置canvas分辨率
         waveCanvas.width = 60 * (window.devicePixelRatio || 1);
@@ -1264,7 +1191,7 @@
         async function setupWebSocket() {
             try {
                 updateLoadingUI('connecting', '正在连接服务器...');
-                const meetingId = '111';
+                const meetingId = '112';
                 const wsUrl = `ws://${window.location.host}/ws/transcribe/${meetingId}/`;
                 console.log('正在连接WebSocket:', wsUrl);
                 
@@ -1897,21 +1824,6 @@
                     updateConnectionState(ConnectionState.DISCONNECTED);
                 }
             }
-        }
-
-        function getCookie(name) {
-            let cookieValue = null;
-            if (document.cookie && document.cookie !== '') {
-                const cookies = document.cookie.split(';');
-                for (let i = 0; i < cookies.length; i++) {
-                    const cookie = cookies[i].trim();
-                    if (cookie.substring(0, name.length + 1) === (name + '=')) {
-                        cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
-                        break;
-                    }
-                }
-            }
-            return cookieValue;
         }
 
         function updateConnectionState(newState) {
