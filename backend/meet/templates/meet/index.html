@@ -1006,6 +1006,11 @@
             console.log('会话状态:', data);
             sessionStatus = data;
             
+            // 显示连接消息
+            if (data.message) {
+                status.textContent = data.message;
+            }
+            
             // recording_status: 0=未开始, 1=录音中, 2=已暂停, 3=已停止, 4=处理中, 5=已完成, 6=已失败
             switch(data.recording_status) {
                 case 0: // 未开始
@@ -1070,78 +1075,142 @@
         // 统一的WebSocket消息处理器
         function handleWebSocketMessage(event) {
             const data = JSON.parse(event.data);
-            console.log('收到消息:', data.type, data);
+            console.log('收到消息:', data);
             
-            switch(data.type) {
-                case 'session_status':
-                    // 连接时收到的会话状态
-                    handleSessionStatus(data);
-                    break;
-                    
-                case 'model_loading_progress':
-                    // 模型加载进度在 waitForModelReady 中处理
-                    break;
-                    
-                case 'transcription_paused':
-                    // 暂停成功
-                    console.log('录音已暂停');
-                    updateRecordingUI(RecordingState.PAUSED);
-                    status.textContent = `录音已暂停 (已暂停${data.pause_count}次，文件大小: ${formatBytes(data.audio_file_size)})`;
-                    break;
-                    
-                case 'transcription_resumed':
-                    // 恢复成功
-                    console.log('录音已恢复');
-                    updateRecordingUI(RecordingState.RECORDING);
-                    // 重新启动波形动画
-                    if (!animationFrame) {
-                        drawWaveform();
-                    }
-                    break;
-                    
-                case 'transcription_stopped':
-                    // 停止成功
-                    console.log('录音已停止');
-                    updateRecordingUI(RecordingState.PROCESSING);
-                    status.textContent = data.message;
-                    break;
+            // 统一消息格式：type=response, action, status, message, data
+            if (data.type === 'response') {
+                const { action, status: msgStatus, message, code, data: msgData } = data;
                 
-                case 'transcription_result':
-                    updateTranscription(data.result);
-                    break;
-                    
-                case 'transcription_started':
-                    console.log('转录已开始');
-                    break;
-                    
-                case 'offline_processing_started':
-                    showProcessingStatus(data.message);
-                    break;
-                    
-                case 'offline_processing_completed':
-                    showFinalResults(data.result);
-                    break;
-                    
-                case 'processing_status':
-                    console.log('Processing status:', data.data);
-                    break;
-                    
-                case 'error':
-                    // 特殊处理：如果错误是关于暂停状态的，提示用户点击按钮恢复
-                    if (data.message && data.message.includes('暂停状态')) {
-                        console.log('检测到暂停状态错误，更新UI');
-                        updateRecordingUI(RecordingState.PAUSED);
-                        recordButton.classList.add('paused');
-                        status.innerHTML = '<span class="status-indicator paused"></span>检测到暂停的录音，点击按钮继续录音';
-                        showError('会话处于暂停状态，点击按钮继续录音');
-                    } else {
-                        showError(data.message);
-                    }
-                    break;
-                    
-                default:
-                    console.log('未知消息类型:', data.type);
+                // 根据 action 和 status 处理消息
+                switch(action) {
+                    case 'connect':
+                        // 连接成功
+                        if (msgStatus === 'success') {
+                            handleSessionStatus({ ...msgData, message });
+                        }
+                        break;
+                        
+                    case 'start':
+                        if (msgStatus === 'warning') {
+                            // 无法开始（例如：需要先恢复录音）
+                            console.log('无法开始录音:', message);
+                            showWarning(message);
+                            // 如果可以恢复，更新UI
+                            if (msgData.can_resume) {
+                                updateRecordingUI(RecordingState.PAUSED);
+                            }
+                        } else if (msgStatus === 'error') {
+                            // 初始化失败
+                            console.error('初始化失败:', message);
+                            hideInitializationOverlay();
+                            showError(message);
+                        } else if (msgStatus === 'success') {
+                            // 启动成功或初始化完成
+                            if (msgData.stage === 'ready') {
+                                console.log('音频处理系统已就绪');
+                            }
+                        }
+                        break;
+                        
+                    case 'model_loading':
+                        // 模型加载进度 (在 waitForModelReady 中处理)
+                        break;
+                        
+                    case 'pause':
+                        if (msgStatus === 'success') {
+                            console.log('录音已暂停');
+                            updateRecordingUI(RecordingState.PAUSED);
+                            status.textContent = `录音已暂停 (已暂停${msgData.pause_count}次，文件大小: ${formatBytes(msgData.audio_file_size)})`;
+                        } else if (msgStatus === 'warning') {
+                            showWarning(message);
+                        }
+                        break;
+                        
+                    case 'resume':
+                        if (msgStatus === 'success') {
+                            console.log('录音已恢复');
+                            updateRecordingUI(RecordingState.RECORDING);
+                            if (!animationFrame) {
+                                drawWaveform();
+                            }
+                        } else if (msgStatus === 'warning') {
+                            showWarning(message);
+                        } else if (msgStatus === 'error') {
+                            showError(message);
+                        }
+                        break;
+                        
+                    case 'stop':
+                        if (msgStatus === 'success') {
+                            console.log('录音已停止');
+                            updateRecordingUI(RecordingState.PROCESSING);
+                            status.textContent = message;
+                        } else if (msgStatus === 'warning') {
+                            showWarning(message);
+                        } else if (msgStatus === 'error') {
+                            showError(message);
+                        }
+                        break;
+                        
+                    case 'transcription':
+                        // 转录结果
+                        if (msgStatus === 'success' && msgData) {
+                            updateTranscription(msgData);
+                        }
+                        break;
+                        
+                    case 'processing':
+                        // 处理状态更新
+                        if (msgStatus === 'success') {
+                            console.log('处理状态:', msgData);
+                        } else if (msgStatus === 'error') {
+                            showError(message);
+                        }
+                        break;
+                        
+                    case 'offline_processing':
+                        if (msgData.stage === 'started') {
+                            showProcessingStatus(message);
+                        } else if (msgData.stage === 'completed') {
+                            showFinalResults(msgData.result);
+                        } else if (msgStatus === 'error') {
+                            showError(message);
+                        }
+                        break;
+                        
+                    case 'ping':
+                        // 心跳响应
+                        console.log('心跳响应:', msgData.timestamp);
+                        break;
+                        
+                    case 'audio':
+                    case 'message':
+                    case 'general':
+                        // 通用错误或警告
+                        if (msgStatus === 'error') {
+                            showError(message);
+                        } else if (msgStatus === 'warning') {
+                            showWarning(message);
+                        }
+                        break;
+                        
+                    default:
+                        console.log('未知action:', action);
+                }
+            } else {
+                // 兼容旧格式（如果有的话）
+                console.log('收到非标准格式消息:', data);
             }
+        }
+        
+        // 新增：显示警告消息
+        function showWarning(message) {
+            console.warn('警告:', message);
+            status.textContent = message;
+            status.style.color = '#ff9800';
+            setTimeout(() => {
+                status.style.color = '';
+            }, 5000);
         }
 
         function showInitializationOverlay() {
@@ -1506,31 +1575,33 @@
                     const data = JSON.parse(event.data);
                     console.log('模型加载消息:', data);
                     
-                    // 处理错误消息
-                    if (data.type === 'error') {
-                        console.error('模型加载过程中收到错误:', data.message);
-                        websocket.onmessage = originalOnMessage;
-                        hideInitializationOverlay(); // 关闭弹窗
-                        reject(new Error(data.message || '初始化失败'));
-                        return;
-                    }
-                    
-                    // 统一处理 model_loading_progress 消息
-                    if (data.type === 'model_loading_progress') {
-                        const stage = data.stage;
-                        const message = data.message;
+                    // 统一格式处理
+                    if (data.type === 'response') {
+                        const { action, status: msgStatus, message, data: msgData } = data;
                         
-                        // 更新UI
-                        updateLoadingUI(stage, message);
-                        
-                        // 判断是否完成
-                        if (stage === 'transcription_started') {
-                            websocket.onmessage = originalOnMessage;
-                            resolve();
-                        } else if (stage === 'transcription_failed') {
-                            websocket.onmessage = originalOnMessage;
-                            hideInitializationOverlay(); // 关闭弹窗
-                            reject(new Error(message || '模型加载失败'));
+                        if (action === 'model_loading' && msgStatus === 'success') {
+                            const stage = msgData.stage;
+                            
+                            // 更新UI
+                            updateLoadingUI(stage, message);
+                            
+                            // 不需要判断完成，等待 start action 的 ready 状态
+                        } else if (action === 'start') {
+                            if (msgStatus === 'success' && msgData.stage === 'ready') {
+                                // 模型加载完成
+                                websocket.onmessage = originalOnMessage;
+                                resolve();
+                            } else if (msgStatus === 'error') {
+                                // 初始化失败
+                                websocket.onmessage = originalOnMessage;
+                                hideInitializationOverlay();
+                                reject(new Error(message || '模型加载失败'));
+                            }
+                        } else {
+                            // 其他消息交给原处理器
+                            if (originalOnMessage) {
+                                originalOnMessage(event);
+                            }
                         }
                     } else {
                         // 其他消息交给原处理器
@@ -1623,22 +1694,24 @@
                 const originalOnMessage = websocket.onmessage;
                 websocket.onmessage = (event) => {
                     const data = JSON.parse(event.data);
-                    console.log('收到停止后消息:', data.type);
+                    console.log('收到停止后消息:', data);
                     
-                    if (data.type === 'offline_processing_started') {
-                        status.textContent = data.message || '正在进行离线处理...';
-                    } else if (data.type === 'offline_processing_completed') {
-                        status.textContent = '处理完成';
-                        showFinalResults(data.result);
-                        updateRecordingUI(RecordingState.IDLE);
-                        updateConnectionState(ConnectionState.DISCONNECTED);
-                        setTimeout(() => {
-                            if (websocket) {
-                                websocket.close();
-                                websocket = null;
-                            }
-                        }, 1000);
-                    } else if (data.type === 'transcription_stopped') {
+                    if (data.type === 'response' && data.action === 'offline_processing') {
+                        if (data.data && data.data.stage === 'started') {
+                            status.textContent = data.message || '正在进行离线处理...';
+                        } else if (data.data && data.data.stage === 'completed') {
+                            status.textContent = '处理完成';
+                            showFinalResults(data.data.result);
+                            updateRecordingUI(RecordingState.IDLE);
+                            updateConnectionState(ConnectionState.DISCONNECTED);
+                            setTimeout(() => {
+                                if (websocket) {
+                                    websocket.close();
+                                    websocket = null;
+                                }
+                            }, 1000);
+                        }
+                    } else if (data.type === 'response' && data.action === 'stop') {
                         console.log('转录已停止，等待离线处理...');
                     } else {
                         if (originalOnMessage) {

@@ -46,7 +46,7 @@ class ModelManager:
                 actual_model_path = snapshot_download(**download_kwargs)
                 print(f"✓ 模型下载完成: {actual_model_path}")
             model = AutoModel(
-                model=model_path,
+                model=model_path,disable_update=True,
                 **model_config  # 展开模型配置
             )
             self.loaded_models[model_name] = model

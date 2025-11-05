@@ -77,18 +77,19 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
         await self.accept()
         
         # ← 发送当前状态给前端
-        await self.send(text_data=json.dumps({
-            'type': 'session_status',
-            'session_id': self.session_id,
-            'recording_status': self.session.recording_status,
-            'recording_status_display': dict(RealtimeRecordingSession.RECORDING_STATUS_CHOICES)[self.session.recording_status],
-            'pause_count': self.session.pause_count,
-            'audio_size': self.session.audio_size,
-            'message': '会话已连接',
-            'can_resume': self.session.recording_status == 2,  # 是否处于暂停状态
-            'resume_hint': '检测到未完成的录音，可以继续录音' if self.session.recording_status == 2 else None
-
-        }))
+        await self.send_response(
+            action='connect',
+            status='success',
+            message='会话已连接',
+            data={
+                'recording_status': self.session.recording_status,
+                'recording_status_display': dict(RealtimeRecordingSession.RECORDING_STATUS_CHOICES)[self.session.recording_status],
+                'pause_count': self.session.pause_count,
+                'audio_size': self.session.audio_size,
+                'can_resume': self.session.recording_status == 2,
+                'resume_hint': '检测到未完成的录音，可以继续录音' if self.session.recording_status == 2 else None
+            }
+        )
         
         logger.info(f"转录会话 {self.session_id} 已连接，状态: {self.session.get_recording_status_display()}")
     
@@ -159,20 +160,21 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
                         raise ValueError("消息必须是JSON对象")
                     await self.handle_control_message(data)
                 except json.JSONDecodeError:
-                    await self.send_error("无效的JSON格式")
+                    await self.send_response('message', 'error', '无效的JSON格式', code='INVALID_JSON')
                 except ValueError as e:
-                    await self.send_error(str(e))
+                    await self.send_response('message', 'error', str(e), code='INVALID_MESSAGE')
             elif bytes_data:
                 # 音频数据处理
-                if not getattr(self, 'transcription_active', False):  # ← 使用getattr安全获取
-                    await self.send_error("请先发送start_transcription命令")
-                    return
+                # if not getattr(self, 'transcription_active', False) and not getattr(self, 'is_paused', False):
+                #     # 只有在既没有激活转录，也不是暂停状态时才返回警告
+                #     await self.send_response('audio', 'warning', '请先发送start_transcription命令', code='NOT_STARTED')
+                #     return
                 await self.handle_audio_data(bytes_data)
             else:
-                await self.send_error("无效的消息格式")
+                await self.send_response('message', 'error', '无效的消息格式', code='INVALID_FORMAT')
         except Exception as e:
             logger.error(f"消息处理错误: {e}")
-            await self.send_error(str(e))
+            await self.send_response('message', 'error', str(e), code='PROCESSING_ERROR')
     
     async def handle_control_message(self, data):
         """处理控制消息"""
@@ -182,7 +184,13 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
             # ← 检查数据库状态
             can_start, msg = await self._check_can_start()
             if not can_start:
-                await self.send_error(msg)
+                await self.send_response(
+                    action='start',
+                    status='warning',
+                    message=msg,
+                    code='CANNOT_START',
+                    data={'recording_status': self.session.recording_status, 'can_resume': self.session.recording_status == 2}
+                )
                 return
                 
             """
@@ -192,11 +200,12 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
             3. 发送"模型加载完成"消息
             """
             # 立即响应，告诉前端开始加载
-            await self.send(text_data=json.dumps({
-                'type': 'transcription_starting',
-                'session_id': self.session_id,
-                'message': '正在初始化音频处理系统...'
-            }))
+            await self.send_response(
+                action='start',
+                status='success',
+                message='正在初始化音频处理系统...',
+                data={'stage': 'initializing'}
+            )
             
             # 异步执行初始化（只调用一次）
             asyncio.create_task(self._initialize_and_start_processing())
@@ -204,32 +213,54 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
         elif message_type == 'pause_transcription':
             can_pause, msg = await self._check_can_pause()
             if not can_pause:
-                await self.send_error(msg)
+                await self.send_response(
+                    action='pause',
+                    status='warning',
+                    message=msg,
+                    code='CANNOT_PAUSE'
+                )
                 return
             await self._handle_pause_transcription()
         
         elif message_type == 'resume_transcription':
             can_resume, msg = await self._check_can_resume()
             if not can_resume:
-                await self.send_error(msg)
+                await self.send_response(
+                    action='resume',
+                    status='warning',
+                    message=msg,
+                    code='CANNOT_RESUME'
+                )
                 return
             await self._handle_resume_transcription()
         
         elif message_type == 'stop_transcription':
             can_stop, msg = await self._check_can_stop()
             if not can_stop:
-                await self.send_error(msg)
+                await self.send_response(
+                    action='stop',
+                    status='warning',
+                    message=msg,
+                    code='CANNOT_STOP'
+                )
                 return
             await self._handle_stop_transcription()
                 
         elif message_type == 'ping':
             # 心跳
-            await self.send(text_data=json.dumps({
-                'type': 'pong',
-                'timestamp': datetime.datetime.now().isoformat()
-            }))
+            await self.send_response(
+                action='ping',
+                status='success',
+                message='',
+                data={'timestamp': datetime.datetime.now().isoformat()}
+            )
         else:
-            await self.send_error(f"不支持的消息类型: {message_type}")
+            await self.send_response(
+                action='message',
+                status='warning',
+                message=f"不支持的消息类型: {message_type}",
+                code='UNSUPPORTED_TYPE'
+            )
 
     async def _initialize_and_start_processing(self):
         """
@@ -237,22 +268,22 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
         """
         try:
             # 1. 通知：模型正在准备
-            await self.send(text_data=json.dumps({
-                'type': 'model_loading_progress',
-                'session_id': self.session_id,
-                'stage': 'model_loading_started',
-                'message': '正在加载AI模型...'
-            }))
+            await self.send_response(
+                action='model_loading',
+                status='success',
+                message='正在加载AI模型...',
+                data={'stage': 'loading', 'progress': 0}
+            )
 
              # 2. 定义进度回调
             async def progress_callback(stage: str, message: str):
                 """模型加载进度回调"""
-                await self.send(text_data=json.dumps({
-                    'type': 'model_loading_progress',
-                    'session_id': self.session_id,
-                    'stage': stage,
-                    'message': message
-                }))
+                await self.send_response(
+                    action='model_loading',
+                    status='success',
+                    message=message,
+                    data={'stage': stage}
+                )
 
             # 3. 带回调地加载模型
             logger.info("开始加载模型...")
@@ -287,12 +318,12 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
             self.is_paused = False
 
             # 9. 发送完成消息
-            await self.send(text_data=json.dumps({
-                'type': 'model_loading_progress',
-                'session_id': self.session_id,
-                'stage': 'transcription_started',
-                'message': '音频处理系统已就绪，可以开始录音'
-            }))
+            await self.send_response(
+                action='start',
+                status='success',
+                message='音频处理系统已就绪，可以开始录音',
+                data={'stage': 'ready', 'recording_status': 1}
+            )
             
             logger.info("音频处理系统启动完成")
             
@@ -309,12 +340,13 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
                 await self._cleanup_audio_processor()
             
             # 发送错误消息
-            await self.send(text_data=json.dumps({
-                'type': 'model_loading_progress',
-                'session_id': self.session_id,
-                'stage': 'transcription_failed',
-                'message': f'初始化失败，请刷新页面重试: {str(e)}'
-            }))
+            await self.send_response(
+                action='start',
+                status='error',
+                message=f'初始化失败，请刷新页面重试: {str(e)}',
+                code='INIT_FAILED',
+                data={'stage': 'failed'}
+            )
 
     async def _handle_pause_transcription(self):
         """处理暂停"""
@@ -340,13 +372,15 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
         await self._refresh_session()
         
         # 5. 响应前端
-        await self.send(text_data=json.dumps({
-            'type': 'transcription_paused',
-            'session_id': self.session_id,
-            'message': '录音已暂停',
-            'pause_count': self.session.pause_count,
-            'audio_file_size': self.session.audio_size
-        }))
+        await self.send_response(
+            action='pause',
+            status='success',
+            message='录音已暂停',
+            data={
+                'pause_count': self.session.pause_count,
+                'audio_file_size': self.session.audio_size
+            }
+        )
 
     async def _handle_resume_transcription(self):
         """处理恢复"""
@@ -356,6 +390,29 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
             # 1. 检查文件存在
             if not os.path.exists(self.temp_audio_file):
                 raise Exception(f"音频文件不存在: {self.temp_audio_file}")
+
+            # 检查 AudioProcessor 是否已启动
+            if hasattr(self, 'audio_processor') and self.audio_processor:
+                # 检查状态，如果不是 RUNNING，需要启动
+                if self.audio_processor._state != "RUNNING":
+                    logger.info("AudioProcessor未启动，正在启动...")
+                    
+                    # 加载模型（如果需要）
+                    if hasattr(self.audio_processor, 'prepare_streaming_models'):
+                        logger.info("准备流式模型...")
+                        success = await self.audio_processor.prepare_streaming_models()
+                        if not success:
+                            raise Exception("模型准备失败")
+                    
+                    # 启动 AudioProcessor
+                    logger.info("启动AudioProcessor...")
+                    self.results_generator = await self.audio_processor.create_tasks()
+                    
+                    # 启动结果处理任务
+                    self.result_handler_task = asyncio.create_task(self._handle_results())
+                    logger.info("AudioProcessor已启动")
+            else:
+                raise Exception("AudioProcessor不可用")
             
             # 2. 以追加模式打开文件
             self.audio_file_handle = open(self.temp_audio_file, 'ab')
@@ -365,22 +422,30 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
             
             # 4. 设置内存标志
             self.is_paused = False
+            self.transcription_active = True
             
             # 5. 刷新session对象
             await self._refresh_session()
             
             # 6. 响应前端
-            await self.send(text_data=json.dumps({
-                'type': 'transcription_resumed',
-                'session_id': self.session_id,
-                'message': '录音已恢复',
-                'pause_count': self.session.pause_count,
-                'audio_file_size': self.session.audio_size
-            }))
+            await self.send_response(
+                action='resume',
+                status='success',
+                message='录音已恢复',
+                data={
+                    'pause_count': self.session.pause_count,
+                    'audio_file_size': self.session.audio_size
+                }
+            )
             
         except Exception as e:
             logger.error(f"恢复录音失败: {e}")
-            await self.send_error(f"恢复录音失败: {str(e)}")
+            await self.send_response(
+                action='resume',
+                status='error',
+                message=f"恢复录音失败: {str(e)}",
+                code='RESUME_FAILED'
+            )
 
     async def _handle_stop_transcription(self):
         """处理停止"""
@@ -405,7 +470,12 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
         # 4. 验证文件
         if not os.path.exists(self.temp_audio_file):
             logger.error("录音文件不存在")
-            await self.send_error("录音文件不存在")
+            await self.send_response(
+                action='stop',
+                status='error',
+                message='录音文件不存在',
+                code='FILE_NOT_FOUND'
+            )
             return
         
         # 5. 启动后台任务
@@ -421,13 +491,15 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
         await self._refresh_session()
         
         # 7. 响应前端
-        await self.send(text_data=json.dumps({
-            'type': 'transcription_stopped',
-            'session_id': self.session_id,
-            'message': '录音已停止，正在后台处理...',
-            'pause_count': self.session.pause_count,
-            'task_id': task.id
-        }))
+        await self.send_response(
+            action='stop',
+            status='success',
+            message='录音已停止，正在后台处理...',
+            data={
+                'pause_count': self.session.pause_count,
+                'task_id': task.id
+            }
+        )
         
         logger.info(f"后台任务已启动: {task.id}")
         
@@ -456,11 +528,12 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
         """处理离线音频并在完成后清理资源"""
         try:
             # 发送离线处理开始通知
-            await self.send(text_data=json.dumps({
-                'type': 'offline_processing_started',
-                'message': f'正在处理 {len(self.audio_segments)} 个音频段...',
-                'session_id': self.session_id
-            }))
+            await self.send_response(
+                action='offline_processing',
+                status='success',
+                message=f'正在处理 {len(self.audio_segments)} 个音频段...',
+                data={'stage': 'started'}
+            )
             
             # 1. 合并音频段
             merged_audio_path = await self._merge_audio_segments()
@@ -479,18 +552,24 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
             )
             
             # 4. 发送处理完成通知
-            await self.send(text_data=json.dumps({
-                'type': 'offline_processing_completed',
-                'result': result,
-                'session_id': self.session_id
-            }))
+            await self.send_response(
+                action='offline_processing',
+                status='success',
+                message='离线处理完成',
+                data={'stage': 'completed', 'result': result}
+            )
             
             logger.info("离线处理完成")
             
         except Exception as e:
             logger.error(f"离线处理失败: {e}")
             try:
-                await self.send_error(f"离线处理失败: {str(e)}")
+                await self.send_response(
+                    action='offline_processing',
+                    status='error',
+                    message=f"离线处理失败: {str(e)}",
+                    code='OFFLINE_PROCESSING_FAILED'
+                )
             except Exception:
                 pass  # 连接可能已关闭
         finally:
@@ -529,7 +608,12 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
         except Exception as e:
             logger.error(f"音频数据处理异常: {e}")
             # ← 添加：通知前端错误
-            await self.send_error(f"音频数据处理异常: {str(e)}")
+            await self.send_response(
+                action='audio',
+                status='error',
+                message=f"音频数据处理异常: {str(e)}",
+                code='AUDIO_PROCESSING_ERROR'
+            )
 
     async def _handle_results(self):
         """处理AudioProcessor的结果流"""
@@ -543,13 +627,20 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
                     break
                     
                 if result.get('status') == 'error':
-                    await self.send_error(result.get('message', '音频处理错误'))
+                    await self.send_response(
+                        action='processing',
+                        status='error',
+                        message=result.get('message', '音频处理错误'),
+                        code='PROCESSING_ERROR'
+                    )
                 else:
                     # 可以发送状态更新给前端
-                    await self.send(text_data=json.dumps({
-                        'type': 'processing_status',
-                        'data': result
-                    }))
+                    await self.send_response(
+                        action='processing',
+                        status='success',
+                        message='',
+                        data=result
+                    )
         except asyncio.CancelledError:
             logger.info("结果处理任务被取消")
             # 确保在任务取消时也关闭生成器
@@ -579,7 +670,12 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
 
     async def _handle_audio_error(self, error_msg: str):
         """处理音频错误回调"""
-        await self.send_error(error_msg) 
+        await self.send_response(
+            action='audio',
+            status='error',
+            message=error_msg,
+            code='AUDIO_ERROR'
+        ) 
     
     def _transcribe_audio_chunk(self, audio_file):
         """转录音频块 - 同步方法在线程池中执行"""
@@ -729,33 +825,47 @@ class TranscriptionConsumer(AsyncWebsocketConsumer):
         self.transcription_active = False  # ← 清理状态
         self.meeting_id = self.session_id
         
-        await self.send(text_data=json.dumps({
-            'type': 'transcription_stopped',
-            'session_id': self.session_id,
-            'timestamp': datetime.datetime.now().isoformat()
-        }))
+        await self.send_response(
+            action='stop',
+            status='success',
+            message='转录会话已停止',
+            data={'timestamp': datetime.datetime.now().isoformat()}
+        )
         
         logger.info(f"会话 {self.session_id} 停止转录")
     
     async def send_transcription_result(self, result):
         """发送转录结果"""
-        await self.send(text_data=json.dumps({
-            'type': 'transcription_result',
-            'session_id': self.session_id,
-            'result': result
-        }))
+        await self.send_response(
+            action='transcription',
+            status='success',
+            message='',
+            data=result
+        )
     
-    async def send_error(self, message):
+    async def send_response(self, action, status, message, code=None, data=None):
+        """发送统一格式的响应消息"""
         if not self.connected:
-            logger.warning(f"尝试在关闭的连接上发送错误消息: {message}")
+            logger.warning(f"尝试在关闭的连接上发送消息: {message}")
             return
         try:
-            await self.send(text_data=json.dumps({
-                'type': 'error',
-                'message': message
-            }))
+            response = {
+                'type': 'response',
+                'action': action,
+                'status': status,
+                'message': message,
+                'session_id': getattr(self, 'session_id', None),
+                'data': data or {}
+            }
+            if code:
+                response['code'] = code
+            await self.send(text_data=json.dumps(response))
         except Exception as e:
-            logger.error(f"发送错误消息失败: {e}")
+            logger.error(f"发送响应消息失败: {e}")
+
+    async def send_error(self, message, action='general', code=None):
+        """发送错误消息（仅用于服务错误）"""
+        await self.send_response(action=action, status='error', message=message, code=code)
     
     @database_sync_to_async
     def get_meeting(self, meeting_id):
