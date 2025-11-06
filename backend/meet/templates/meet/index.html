@@ -1191,7 +1191,7 @@ websocket.onopen = () => {
         async function setupWebSocket() {
             try {
                 updateLoadingUI('connecting', '正在连接服务器...');
-                const meetingId = '112';
+                const meetingId = '119';
                 const wsUrl = `ws://${window.location.host}/ws/transcribe/${meetingId}/`;
                 console.log('正在连接WebSocket:', wsUrl);
                 

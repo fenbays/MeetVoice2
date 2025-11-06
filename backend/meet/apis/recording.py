@@ -660,6 +660,93 @@ def batch_download_recordings_zip(request, meetingid: int=Query(...), file_type:
         logger.error(f'错误详情: {traceback.format_exc()}')
         raise MeetError('服务器错误，批量下载ZIP文件失败', BusinessCode.SERVER_ERROR.value)
 
+@router.get("/recording/preview/realtime")
+def preview_realtime_recording(request, sessionid: int = Query(...)):
+    """
+    预览实时录音的临时音频文件
+    
+    参数:
+    - session_id: 实时录音会话ID
+    
+    功能:
+    - 返回临时音频文件流供浏览器预览
+    - 支持断点续传和范围请求（用于音频拖动播放）
+    
+    权限:
+    - 需要对会议有查看权限
+    """
+    try:
+        from meet.models import RealtimeRecordingSession
+        
+        # 获取实时录音会话
+        session = get_object_or_404(
+            RealtimeRecordingSession.objects.select_related('meeting'),
+            id=session_id
+        )
+        
+        # 验证用户权限
+        request_user = get_user_info_from_token(request)
+        user_obj = get_object_or_404(User, id=request_user['id'])
+        
+        if not session.meeting.user_can_view(user_obj):
+            raise MeetError('无权访问该录音', BusinessCode.PERMISSION_DENIED.value)
+        
+        # 检查临时文件是否存在
+        if not session.temp_audio_path or not os.path.exists(session.temp_audio_path):
+            raise MeetError('临时音频文件不存在或已被处理', BusinessCode.INSTANCE_NOT_FOUND.value)
+        
+        file_path = session.temp_audio_path
+        
+        # 记录访问日志
+        logger.info(f'用户 {request_user["id"]} 预览实时录音: 会话ID {session_id}, 会议 {session.meeting.id}')
+        
+        # 获取文件MIME类型
+        content_type, _ = mimetypes.guess_type(file_path)
+        if not content_type:
+            # 根据文件扩展名判断
+            ext = os.path.splitext(file_path)[1].lower()
+            content_type_map = {
+                '.webm': 'audio/webm',
+                '.wav': 'audio/wav',
+                '.mp3': 'audio/mpeg',
+                '.m4a': 'audio/mp4',
+                '.ogg': 'audio/ogg',
+            }
+            content_type = content_type_map.get(ext, 'application/octet-stream')
+        
+        # 构建文件名
+        meeting_title = session.meeting.title or "未命名会议"
+        safe_meeting_title = "".join(c for c in meeting_title if c.isalnum() or c in (' ', '-', '_')).strip()
+        safe_meeting_title = safe_meeting_title.replace(' ', '_')
+        
+        file_ext = os.path.splitext(file_path)[1]
+        preview_filename = f"{safe_meeting_title}_实时录音{file_ext}"
+        preview_filename_quoted = quote(preview_filename)
+        
+        # 返回文件响应（inline表示浏览器内预览）
+        response = FileResponse(
+            open(file_path, 'rb'),
+            content_type=content_type,
+            as_attachment=False,  # False表示浏览器内预览，不触发下载
+        )
+        
+        # 设置响应头
+        response['Content-Disposition'] = f'inline; filename="{preview_filename_quoted}"'
+        response['Content-Length'] = os.path.getsize(file_path)
+        response['Accept-Ranges'] = 'bytes'  # 支持断点续传，允许音频播放器拖动
+        response['Cache-Control'] = 'no-cache'  # 不缓存，确保获取最新内容
+        
+        return response
+        
+    except RealtimeRecordingSession.DoesNotExist:
+        raise MeetError('录音会话不存在', BusinessCode.INSTANCE_NOT_FOUND.value)
+    except MeetError:
+        raise
+    except Exception as e:
+        logger.error(f'预览实时录音文件失败: {e}')
+        logger.error(f'错误详情: {traceback.format_exc()}')
+        raise MeetError('服务器错误，预览文件失败', BusinessCode.SERVER_ERROR.value)
+
 # ============= Speaker 说话人相关接口 =============
 
 class SpeakerFilters(MeetFilters):

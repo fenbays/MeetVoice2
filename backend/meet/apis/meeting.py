@@ -345,6 +345,123 @@ class MeetingSchemaOut(ModelSchema):
         temp_report = getattr(self.__class__, '_temp_report_file', {})
         return temp_report.get(self.meetingid, {})
 
+    @computed_field(description="录音状态信息")
+    def recording_info(self) -> dict:
+        """
+        返回会议的录音状态信息，用于前端判断录音操作
+        
+        判断逻辑：
+        1. 优先检查是否有进行中的实时录音会话（状态0-4）
+        2. 如果有Recording，通过是否有realtime_session反向关联判断录音来源
+        """
+        info = {
+            'recordingid': None,               # 录音ID（如果有Recording）
+            'has_recording': False,            # 是否有录音
+            'recording_type': None,            # 录音类型: 'realtime' 或 'offline'
+            'recording_status': None,          # 录音状态值
+            'recording_status_text': None,     # 录音状态文本
+            'can_start_recording': False,      # 是否可以开始录音
+            'can_resume_recording': False,     # 是否可以恢复录音（仅实时录音）
+            'can_pause_recording': False,      # 是否可以暂停录音（仅实时录音）
+            'can_stop_recording': False,       # 是否可以停止录音（仅实时录音）
+            'can_upload_recording': False,     # 是否可以上传录音（仅离线）
+
+            # 实时录音临时文件相关
+            'sessionid': None,                # 实时录音会话ID
+            'session_audio_size': 0,              # 临时音频文件大小（字节）
+            'session_audio_exists': False,        # 临时音频文件是否存在
+        }
+        
+        from meet.models import RealtimeRecordingSession, Recording, Meeting
+        
+        # 1. 优先检查是否有进行中的实时录音会话
+        try:
+            session = RealtimeRecordingSession.objects.select_related('recording').get(
+                meeting_id=self.meetingid
+            )
+            
+            # 如果会话状态为 0-4（未开始/录音中/已暂停/已停止/处理中），说明实时录音还在进行
+            if session.recording_status in [0, 1, 2, 3, 4]:
+                info['has_recording'] = True
+                info['recording_type'] = 'realtime'
+                info['recording_status'] = session.recording_status
+                info['recording_status_text'] = session.get_recording_status_display()
+                
+                # 如果已经关联了Recording，返回recordingid
+                if session.recording:
+                    info['recordingid'] = session.recording.id
+
+                # 检查临时音频文件是否存在
+                if session.temp_audio_path and os.path.exists(session.temp_audio_path):                    
+                    info['session_audio_size'] = os.path.getsize(session.temp_audio_path)
+                    info['session_audio_exists'] = True
+                    logger.info(f'临时音频文件: {session.temp_audio_path}, 大小: {info["session_audio_size"]} bytes')
+                else:
+                    info['session_audio_exists'] = False
+                    logger.info(f'临时音频文件不存在: {session.temp_audio_path}')
+                
+                # 根据状态判断可以执行的操作
+                if session.recording_status == 0:  # 未开始
+                    info['can_start_recording'] = True
+                elif session.recording_status == 1:  # 录音中
+                    info['can_pause_recording'] = True
+                    info['can_stop_recording'] = True
+                elif session.recording_status == 2:  # 已暂停
+                    info['can_resume_recording'] = True
+                    info['can_stop_recording'] = True
+                # 状态3(已停止)和4(处理中)不允许任何操作，等待处理完成
+                
+                return info
+                
+            # 如果会话状态为 5(已完成) 或 6(已失败)，继续检查Recording
+            # 这种情况下，实时录音会话已完成，应该已经生成了Recording
+            
+        except RealtimeRecordingSession.DoesNotExist:
+            pass
+        
+        # 2. 检查是否有Recording（可能来自实时录音完成或离线上传）
+        recording = Recording.objects.filter(
+            meeting_id=self.meetingid,
+            process_status__in=[0, 1, 2]  # 未处理/处理中/已完成
+        ).first()
+        
+        if recording:
+            info['recordingid'] = recording.id
+            info['has_recording'] = True
+            info['recording_status'] = recording.process_status
+            info['recording_status_text'] = recording.get_process_status_display()
+            
+            # 通过反向关联判断录音来源
+            try:
+                # 如果有 realtime_session 反向关联，说明来自实时录音
+                if hasattr(recording, 'realtime_session') and recording.realtime_session.exists():
+                    info['recording_type'] = 'realtime'
+                else:
+                    info['recording_type'] = 'offline'
+            except Exception:
+                # 如果无法判断，默认为离线
+                info['recording_type'] = 'offline'
+            
+            # 录音已完成，不允许任何录音操作
+            return info
+        
+        # 3. 没有录音，检查是否可以开始录音或上传录音
+        try:
+            meeting = Meeting.objects.get(id=self.meetingid)
+            
+            # 检查是否可以开始实时录音
+            can_start, _ = meeting.can_start_realtime_recording()
+            info['can_start_recording'] = can_start
+            
+            # 检查是否可以上传录音文件
+            can_upload, _ = meeting.can_upload_recording()
+            info['can_upload_recording'] = can_upload
+            
+        except Meeting.DoesNotExist:
+            pass
+        
+        return info
+
 class UserSchemaOut(ModelSchema):
     userid: int = Field(..., alias="id")
     class Config:
@@ -440,6 +557,125 @@ class MeetingDetailSchemaOut(ModelSchema):
         
         # 默认返回 owned
         return 'owned'
+
+    @computed_field(description="录音状态信息")
+    def recording_info(self) -> dict:
+        """
+        返回会议的录音状态信息，用于前端判断录音操作
+        
+        判断逻辑：
+        1. 优先检查是否有进行中的实时录音会话（状态0-4）
+        2. 如果有Recording，通过是否有realtime_session反向关联判断录音来源
+        """
+        info = {
+            'recordingid': None,               # 录音ID（如果有Recording）
+            'has_recording': False,            # 是否有录音
+            'recording_type': None,            # 录音类型: 'realtime' 或 'offline'
+            'recording_status': None,          # 录音状态值
+            'recording_status_text': None,     # 录音状态文本
+            'can_start_recording': False,      # 是否可以开始录音
+            'can_resume_recording': False,     # 是否可以恢复录音（仅实时录音）
+            'can_pause_recording': False,      # 是否可以暂停录音（仅实时录音）
+            'can_stop_recording': False,       # 是否可以停止录音（仅实时录音）
+            'can_upload_recording': False,     # 是否可以上传录音（仅离线）
+
+            # 实时录音临时文件相关
+            'sessionid': None,                # 实时录音会话ID
+            'session_audio_size': 0,              # 临时音频文件大小（字节）
+            'session_audio_exists': False,        # 临时音频文件是否存在
+        }
+        
+        from meet.models import RealtimeRecordingSession, Recording, Meeting
+        
+        # 1. 优先检查是否有进行中的实时录音会话
+        try:
+            session = RealtimeRecordingSession.objects.select_related('recording').get(
+                meeting_id=self.meetingid
+            )
+            logger.info(f'实时录音会话: {session}')
+            
+            # 如果会话状态为 0-4（未开始/录音中/已暂停/已停止/处理中），说明实时录音还在进行
+            if session.recording_status in [0, 1, 2, 3, 4]:
+                info['has_recording'] = True
+                info['recording_type'] = 'realtime'
+                info['recording_status'] = session.recording_status
+                info['recording_status_text'] = session.get_recording_status_display()
+                info['sessionid'] = session.id  # 新增：会话ID
+
+                # 如果已经关联了Recording，返回recordingid
+                if session.recording:
+                    info['recordingid'] = session.recording.id              
+
+                # 检查临时音频文件是否存在
+                if session.temp_audio_path and os.path.exists(session.temp_audio_path):                    
+                    info['session_audio_size'] = os.path.getsize(session.temp_audio_path)
+                    info['session_audio_exists'] = True
+                    logger.info(f'临时音频文件: {session.temp_audio_path}, 大小: {info["session_audio_size"]} bytes')
+                else:
+                    info['session_audio_exists'] = False
+                    logger.info(f'临时音频文件不存在: {session.temp_audio_path}')
+                
+                # 根据状态判断可以执行的操作
+                if session.recording_status == 0:  # 未开始
+                    info['can_start_recording'] = True
+                elif session.recording_status == 1:  # 录音中
+                    info['can_pause_recording'] = True
+                    info['can_stop_recording'] = True
+                elif session.recording_status == 2:  # 已暂停
+                    info['can_resume_recording'] = True
+                    info['can_stop_recording'] = True
+                # 状态3(已停止)和4(处理中)不允许任何操作，等待处理完成
+                
+                return info
+                
+            # 如果会话状态为 5(已完成) 或 6(已失败)，继续检查Recording
+            # 这种情况下，实时录音会话已完成，应该已经生成了Recording
+            
+        except RealtimeRecordingSession.DoesNotExist:
+            pass
+        
+        # 2. 检查是否有Recording（可能来自实时录音完成或离线上传）
+        recording = Recording.objects.filter(
+            meeting_id=self.meetingid,
+            process_status__in=[0, 1, 2]  # 未处理/处理中/已完成
+        ).first()
+        
+        if recording:
+            info['recordingid'] = recording.id
+            info['has_recording'] = True
+            info['recording_status'] = recording.process_status
+            info['recording_status_text'] = recording.get_process_status_display()
+            
+            # 通过反向关联判断录音来源
+            try:
+                # 如果有 realtime_session 反向关联，说明来自实时录音
+                if hasattr(recording, 'realtime_session') and recording.realtime_session.exists():
+                    info['recording_type'] = 'realtime'
+                else:
+                    info['recording_type'] = 'offline'
+            except Exception:
+                # 如果无法判断，默认为离线
+                info['recording_type'] = 'offline'
+            
+            # 录音已完成，不允许任何录音操作
+            return info
+        
+        # 3. 没有录音，检查是否可以开始录音或上传录音
+        try:
+            meeting = Meeting.objects.get(id=self.meetingid)
+            
+            # 检查是否可以开始实时录音
+            can_start, _ = meeting.can_start_realtime_recording()
+            info['can_start_recording'] = can_start
+            
+            # 检查是否可以上传录音文件
+            can_upload, _ = meeting.can_upload_recording()
+            info['can_upload_recording'] = can_upload
+            
+        except Meeting.DoesNotExist:
+            pass
+        
+        return info
 
 @router.post("/meeting/create", response=MeetingSchemaOut)
 @anti_duplicate(expire_time=10)
