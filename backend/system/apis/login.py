@@ -1,5 +1,6 @@
 
 from datetime import datetime
+import uuid
 
 from django.contrib import auth
 from django.db import IntegrityError
@@ -58,7 +59,8 @@ def login(request, data: LoginSchema):
     time_now = int(datetime.now().timestamp())
     jwt = MeetJwt(SECRET_KEY, user_obj_dic, valid_to=time_now + TOKEN_LIFETIME)
     token = jwt.encode()
-    device_id = request.headers.get('X-Device-ID', f'web-{token[:16]}')
+    # 暂时不对同时登录设备数做限制
+    device_id = request.headers.get('X-Device-ID', str(uuid.uuid4()))
     token_manager = TokenManager()
     token_manager.store_token(user_obj.id, token, device_id)
     data = {
